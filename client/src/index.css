@@ -1,0 +1,363 @@
+/* Google Fonts — loaded at top to satisfy CSS @import ordering rules */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+:root {
+  /* Agent2077 Cyberpunk Theme — Light base (auto-switches to dark) */
+  --background: 220 15% 96%;
+  --foreground: 220 15% 10%;
+  --card: 220 15% 98%;
+  --card-foreground: 220 15% 10%;
+  --popover: 220 15% 98%;
+  --popover-foreground: 220 15% 10%;
+  --primary: 190 95% 45%;       /* Cyberpunk cyan */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 15% 90%;
+  --secondary-foreground: 220 15% 15%;
+  --muted: 220 15% 92%;
+  --muted-foreground: 220 10% 45%;
+  --accent: 330 85% 55%;        /* Neon pink accent */
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 85% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 15% 85%;
+  --input: 220 15% 85%;
+  --ring: 190 95% 45%;
+  --button-outline: hsl(220, 15%, 75%);
+  --radius: 0.5rem;
+  --chart-1: 190 95% 45%;
+  --chart-2: 330 85% 55%;
+  --chart-3: 45 95% 55%;
+  --chart-4: 120 60% 45%;
+  --chart-5: 270 60% 55%;
+}
+
+.dark {
+  --background: 225 25% 8%;      /* Deep dark blue-black */
+  --foreground: 210 20% 92%;
+  --card: 225 20% 11%;
+  --card-foreground: 210 20% 92%;
+  --popover: 225 20% 11%;
+  --popover-foreground: 210 20% 92%;
+  --primary: 190 95% 50%;        /* Bright cyan */
+  --primary-foreground: 225 25% 5%;
+  --secondary: 225 15% 16%;
+  --secondary-foreground: 210 20% 85%;
+  --muted: 225 15% 14%;
+  --muted-foreground: 210 10% 55%;
+  --accent: 330 85% 60%;         /* Hot pink */
+  --accent-foreground: 225 25% 5%;
+  --destructive: 0 75% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 225 15% 18%;
+  --input: 225 15% 18%;
+  --ring: 190 95% 50%;
+  --button-outline: hsl(225, 15%, 30%);
+  --chart-1: 190 95% 50%;
+  --chart-2: 330 85% 60%;
+  --chart-3: 45 95% 60%;
+  --chart-4: 120 60% 50%;
+  --chart-5: 270 60% 60%;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PROFESSIONAL THEME — v16.39 full redesign
+   Clean SaaS / Linear aesthetic. Inter font, sharp corners,
+   true neutral grays, single indigo accent, no glows.
+   ═══════════════════════════════════════════════════════════ */
+
+:root[data-theme="professional"] {
+  --background: 0 0% 98%;          /* Near-white #FAFAFA */
+  --foreground: 0 0% 9%;           /* Near-black #171717 */
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 0 0% 9%;
+  --primary: 239 84% 67%;          /* Indigo #6366F1 */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 94%;           /* Light gray #F0F0F0 */
+  --secondary-foreground: 0 0% 20%;
+  --muted: 0 0% 95%;
+  --muted-foreground: 0 0% 45%;    /* Medium gray */
+  --accent: 239 84% 67%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 88%;              /* Subtle gray border */
+  --input: 0 0% 88%;
+  --ring: 239 84% 67%;
+  --button-outline: hsl(239, 50%, 70%);
+  --radius: 0.25rem;               /* Sharp — Linear style */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --chart-1: 239 84% 67%;
+  --chart-2: 262 80% 60%;
+  --chart-3: 199 89% 48%;
+  --chart-4: 25 95% 53%;
+  --chart-5: 142 71% 45%;
+}
+
+:root[data-theme="professional"].dark {
+  --background: 0 0% 7%;           /* #111111 */
+  --foreground: 0 0% 93%;          /* #EDEDED */
+  --card: 0 0% 10%;                /* #1A1A1A */
+  --card-foreground: 0 0% 93%;
+  --popover: 0 0% 10%;
+  --popover-foreground: 0 0% 93%;
+  --primary: 239 84% 72%;          /* Lighter indigo for dark bg */
+  --primary-foreground: 0 0% 7%;
+  --secondary: 0 0% 14%;           /* #242424 */
+  --secondary-foreground: 0 0% 80%;
+  --muted: 0 0% 13%;
+  --muted-foreground: 0 0% 52%;
+  --accent: 239 84% 72%;
+  --accent-foreground: 0 0% 7%;
+  --destructive: 0 65% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 18%;              /* #2E2E2E */
+  --input: 0 0% 18%;
+  --ring: 239 84% 72%;
+  --button-outline: hsl(239, 50%, 65%);
+  --radius: 0.25rem;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --chart-1: 239 84% 72%;
+  --chart-2: 262 80% 65%;
+  --chart-3: 199 89% 55%;
+  --chart-4: 25 95% 60%;
+  --chart-5: 142 71% 50%;
+}
+
+/* Professional — layout & typography overrides */
+:root[data-theme="professional"] body,
+:root[data-theme="professional"].dark body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Tighter, sharper cards */
+:root[data-theme="professional"] .rounded-lg,
+:root[data-theme="professional"].dark .rounded-lg { border-radius: 0.25rem; }
+:root[data-theme="professional"] .rounded-md,
+:root[data-theme="professional"].dark .rounded-md { border-radius: 0.2rem; }
+:root[data-theme="professional"] .rounded-xl,
+:root[data-theme="professional"].dark .rounded-xl { border-radius: 0.375rem; }
+
+/* No glow effects in professional mode */
+:root[data-theme="professional"] .glow-cyan,
+:root[data-theme="professional"] .glow-pink,
+:root[data-theme="professional"] .border-glow,
+:root[data-theme="professional"].dark .glow-cyan,
+:root[data-theme="professional"].dark .glow-pink,
+:root[data-theme="professional"].dark .border-glow {
+  text-shadow: none;
+  box-shadow: none;
+}
+
+/* Crisp scrollbar */
+:root[data-theme="professional"] ::-webkit-scrollbar,
+:root[data-theme="professional"].dark ::-webkit-scrollbar { width: 5px; height: 5px; }
+:root[data-theme="professional"] ::-webkit-scrollbar-thumb,
+:root[data-theme="professional"].dark ::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.2);
+  border-radius: 2px;
+}
+
+/* Fast, no-nonsense transitions */
+:root[data-theme="professional"] *,
+:root[data-theme="professional"].dark * {
+  transition-duration: 80ms !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   LOFI THEME — v16.39 full redesign
+   Paper / Warm Analog. Lora headings, Inter body, creamy
+   off-white, rounded corners, soft shadows, slow fades.
+   ═══════════════════════════════════════════════════════════ */
+
+:root[data-theme="lofi"] {
+  /* Lo-Fi Night City — warm indigo/violet midnight palette.
+     Distinct from Cyberpunk (harsh neon cyan/pink on dark-blue)
+     and Professional (bright white/indigo).
+     Think: warm lamp light, purple city haze, late-night study room. */
+  --background: 248 28% 7%;         /* Deep warm indigo-black #0d0b14 */
+  --foreground: 260 20% 88%;        /* Soft lavender-white #dbd8f0 */
+  --card: 248 26% 10%;              /* #13111c */
+  --card-foreground: 260 20% 88%;
+  --popover: 248 26% 10%;
+  --popover-foreground: 260 20% 88%;
+  --primary: 258 65% 68%;           /* Soft violet/periwinkle #8f72e0 — distinct from cyan */
+  --primary-foreground: 248 28% 7%;
+  --secondary: 252 22% 14%;         /* #1a1728 */
+  --secondary-foreground: 260 18% 72%;
+  --muted: 248 24% 12%;             /* #181524 */
+  --muted-foreground: 258 15% 52%;  /* Muted lavender-grey */
+  --accent: 320 55% 65%;            /* Warm rose-pink #d467a8 — city neon glow, warm not harsh */
+  --accent-foreground: 248 28% 7%;
+  --destructive: 350 60% 52%;
+  --destructive-foreground: 260 20% 88%;
+  --border: 250 22% 16%;            /* #1e1a2e */
+  --input: 250 22% 16%;
+  --ring: 258 65% 68%;
+  --button-outline: hsl(258, 40%, 52%);
+  --radius: 1rem;
+  --font-sans: 'Nunito', 'Inter', system-ui, sans-serif;
+  --font-display: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  --chart-1: 258 65% 68%;
+  --chart-2: 320 55% 65%;
+  --chart-3: 200 55% 62%;
+  --chart-4: 280 48% 62%;
+  --chart-5: 170 50% 55%;
+}
+:root[data-theme="lofi"].dark {
+  --background: 248 28% 7%;
+  --foreground: 260 20% 88%;
+  --card: 248 26% 10%;
+  --card-foreground: 260 20% 88%;
+  --popover: 248 26% 10%;
+  --popover-foreground: 260 20% 88%;
+  --primary: 258 65% 68%;
+  --primary-foreground: 248 28% 7%;
+  --secondary: 252 22% 14%;
+  --secondary-foreground: 260 18% 72%;
+  --muted: 248 24% 12%;
+  --muted-foreground: 258 15% 52%;
+  --accent: 320 55% 65%;
+  --accent-foreground: 248 28% 7%;
+  --destructive: 350 60% 52%;
+  --destructive-foreground: 260 20% 88%;
+  --border: 250 22% 16%;
+  --input: 250 22% 16%;
+  --ring: 258 65% 68%;
+  --button-outline: hsl(258, 40%, 52%);
+  --radius: 1rem;
+  --font-sans: 'Nunito', 'Inter', system-ui, sans-serif;
+  --font-display: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  --chart-1: 258 65% 68%;
+  --chart-2: 320 55% 65%;
+  --chart-3: 200 55% 62%;
+  --chart-4: 280 48% 62%;
+  --chart-5: 170 50% 55%;
+}
+:root[data-theme="lofi"] body,
+:root[data-theme="lofi"].dark body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  letter-spacing: 0.01em;
+  line-height: 1.7;
+}
+/* Lofi headings use Space Grotesk */
+:root[data-theme="lofi"] h1, :root[data-theme="lofi"] h2, :root[data-theme="lofi"] h3,
+:root[data-theme="lofi"].dark h1, :root[data-theme="lofi"].dark h2, :root[data-theme="lofi"].dark h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+:root[data-theme="lofi"] .text-xs.font-bold.tracking-wider,
+:root[data-theme="lofi"].dark .text-xs.font-bold.tracking-wider {
+  font-family: var(--font-display);
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+/* Very rounded — cozy lofi feel */
+:root[data-theme="lofi"] .rounded-lg,
+:root[data-theme="lofi"].dark .rounded-lg { border-radius: 1rem; }
+:root[data-theme="lofi"] .rounded-md,
+:root[data-theme="lofi"].dark .rounded-md { border-radius: 0.75rem; }
+:root[data-theme="lofi"] .rounded-xl,
+:root[data-theme="lofi"].dark .rounded-xl { border-radius: 1.25rem; }
+/* Warm violet border tint */
+:root[data-theme="lofi"] .border,
+:root[data-theme="lofi"].dark .border {
+  border-color: hsl(250, 22%, 20%);
+}
+/* No harsh neon — soft violet/rose bloom only */
+:root[data-theme="lofi"] .glow-cyan,
+:root[data-theme="lofi"] .glow-pink,
+:root[data-theme="lofi"] .border-glow,
+:root[data-theme="lofi"].dark .glow-cyan,
+:root[data-theme="lofi"].dark .glow-pink,
+:root[data-theme="lofi"].dark .border-glow {
+  text-shadow: 0 0 18px rgba(143, 114, 224, 0.4);
+  box-shadow: none;
+}
+/* Dreamy thin scrollbar */
+:root[data-theme="lofi"] ::-webkit-scrollbar,
+:root[data-theme="lofi"].dark ::-webkit-scrollbar { width: 5px; height: 5px; }
+:root[data-theme="lofi"] ::-webkit-scrollbar-thumb,
+:root[data-theme="lofi"].dark ::-webkit-scrollbar-thumb {
+  background: hsl(250, 22%, 20%);
+  border-radius: 8px;
+}
+/* Slow dreamy transitions */
+:root[data-theme="lofi"] *,
+:root[data-theme="lofi"].dark * {
+  transition-duration: 280ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Sidebar — warm deep indigo gradient */
+:root[data-theme="lofi"] [data-testid="sidebar"],
+:root[data-theme="lofi"].dark [data-testid="sidebar"] {
+  background: linear-gradient(180deg, hsl(252, 32%, 8%) 0%, hsl(248, 28%, 7%) 100%);
+}
+/* Rounder buttons */
+:root[data-theme="lofi"] button,
+:root[data-theme="lofi"].dark button {
+  border-radius: 0.75rem;
+}
+/* Inputs */
+:root[data-theme="lofi"] input,
+:root[data-theme="lofi"] textarea,
+:root[data-theme="lofi"].dark input,
+:root[data-theme="lofi"].dark textarea {
+  border-radius: 0.75rem;
+  background: hsl(248, 26%, 9%);
+}
+/* Chat bubbles */
+:root[data-theme="lofi"] .rounded-2xl,
+:root[data-theme="lofi"].dark .rounded-2xl { border-radius: 1.5rem; }
+
+/* Agent2077 cyberpunk glow effects */
+.glow-cyan { text-shadow: 0 0 10px hsl(190 95% 50% / 0.5), 0 0 20px hsl(190 95% 50% / 0.3); }
+.glow-pink { text-shadow: 0 0 10px hsl(330 85% 60% / 0.5), 0 0 20px hsl(330 85% 60% / 0.3); }
+.border-glow { box-shadow: 0 0 0 1px hsl(190 95% 50% / 0.3), 0 0 15px hsl(190 95% 50% / 0.1); }
+
+/* Code blocks */
+pre code { font-family: 'JetBrains Mono', 'Fira Code', monospace; @apply whitespace-pre-wrap break-words; }
+pre { @apply rounded-md overflow-x-auto max-w-full; }
+
+/* Markdown rendered content */
+.markdown-content h1 { @apply text-lg font-bold mt-4 mb-2; }
+.markdown-content h2 { @apply text-base font-bold mt-3 mb-2; }
+.markdown-content h3 { @apply text-sm font-bold mt-2 mb-1; }
+.markdown-content p { @apply mb-2 leading-relaxed; }
+.markdown-content ul, .markdown-content ol { @apply mb-2 pl-5; }
+.markdown-content ul { @apply list-disc; }
+.markdown-content ol { @apply list-decimal; }
+.markdown-content li { @apply mb-1; }
+.markdown-content a { @apply text-primary underline; }
+.markdown-content blockquote { @apply border-l-2 border-primary/50 pl-3 italic text-muted-foreground; }
+.markdown-content table { @apply w-full border-collapse mb-2; }
+.markdown-content th, .markdown-content td { @apply border border-border px-2 py-1 text-xs; }
+.markdown-content th { @apply bg-muted font-medium; }
+
+/* Pulse animation for loading states */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.animate-pulse-glow { animation: pulse-glow 1.5s ease-in-out infinite; }

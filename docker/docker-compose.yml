@@ -1,0 +1,18 @@
+version: "3.8"
+
+# Supporting services for Agent2077
+# Agent2077 itself runs natively on the host
+# Database: SQLite (no external DB needed)
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: agent2077-searxng
+    restart: unless-stopped
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888
+    labels:
+      - "agent2077.service=searxng"

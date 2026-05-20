@@ -1,0 +1,57 @@
+import { build as esbuild } from "esbuild";
+import { build as viteBuild } from "vite";
+import { rm, readFile } from "fs/promises";
+
+// server deps to bundle to reduce openat(2) syscalls
+// which helps cold start times
+// Packages to bundle (not external) for faster cold starts
+const allowlist = [
+  "bcryptjs",
+  "cookie-parser",
+  "cors",
+  "drizzle-orm",
+  "drizzle-zod",
+  "eventsource-parser",
+  "express",
+  "express-session",
+  "helmet",
+  "jsonwebtoken",
+  "morgan",
+  "nanoid",
+  "uuid",
+  "zod",
+];
+
+async function buildAll() {
+  await rm("dist", { recursive: true, force: true });
+
+  console.log("building client...");
+  await viteBuild();
+
+  console.log("building server...");
+  const pkg = JSON.parse(await readFile("package.json", "utf-8"));
+  const allDeps = [
+    ...Object.keys(pkg.dependencies || {}),
+    ...Object.keys(pkg.devDependencies || {}),
+  ];
+  const externals = allDeps.filter((dep) => !allowlist.includes(dep));
+
+  await esbuild({
+    entryPoints: ["server/index.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outfile: "dist/index.cjs",
+    define: {
+      "process.env.NODE_ENV": '"production"',
+    },
+    minify: true,
+    external: [...externals, "vite", "playwright", "playwright-core", "chromium-bidi"],
+    logLevel: "info",
+  });
+}
+
+buildAll().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
