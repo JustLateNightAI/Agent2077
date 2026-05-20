@@ -178,6 +178,13 @@ Agent2077 can execute commands, edit files, connect to model endpoints, and depl
 
 Agent2077 is under active development by LateNightAI. Expect inconstant Development and sporadic fixes and feature additions. If there's something you really want added to Agent2077 then either wait for me to add it or do it yourself using the Self Dev mode.
 
+## Useful info rambling from me the Dev :D
+
+I built agent2077 to be modular and useful for coding and making things. I was also making some stuff for it to be useful in chatting and image gen/editing via comfyui but ended up spending most of my time working on the self dev and workspace, and app store. I mostly developed around using LM Studio for local models. If you enable more than one model in the model selector for lm studio, in theory it should load and unload models according to when tasks tags you assign to the models. IE, you turn on Qwen3.6 27B and give it the coding tag, and you turn on gemma4 31B and give it the research tag. It should then load the gemma model to do research, then when given a coding task, unload the gemma model to free the vram, and load the qwen3.6 37B model to do coding. 
+For the app store its mostly meant for webapps, and will require docker to be setup. but the basics of it is, in the normal chat you ask it to build you an app and add it to the app store. IE, "build me a flappy birds game and add it to the app store" then (if the model your using is good enough) it will code up a flappy birds like game and add it to the app store where you can launch it and play it. 
+Hopefully soon if I'm motivated enough I'll make an indepth video on how to setup and use Agent2077 and throw it up and YouTube and I'll link it here if/when I do.
+
+
 ## License
 
 Agent2077 is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE) for details.
