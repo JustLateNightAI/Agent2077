@@ -182,4 +182,4 @@ Agent2077 is under active development. Expect fast iteration around local-model 
 
 Agent2077 is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE) for details.
 
-For commercial licensing inquiries, contact greencreeperfilms@gmail.com.
+For commercial licensing inquiries, contact JustLateNightAI@gmail.com.
