@@ -6,7 +6,7 @@ You are fully responible for anything that happens by you installing and using t
 
 If this agent is useful to you, feel free to help support its further development :D
 https://ko-fi.com/latenightai
-(current costs spent on development: $1,083.46 USD)
+(current costs spent on development: $1,283.46 USD)
 
 My random neglected Discord: https://discord.gg/3yTAQ4xEAr
 Maybe I'll answer your questions, maybe I wont, depends on my coffee supply.
