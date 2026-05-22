@@ -65,9 +65,8 @@ add the "--listen flag" to have it start serving on the local network. (When ser
 Open:
 
 ```text
-http://localhost:5000
-it when serving on the local network it should host to agent2077.local
-(deviceIP:5000)
+when serving on the local network it should host to agent2077.local
+(deviceIP:5000) or from the host machine http://localhost:5000
 ```
 
 Default login:
