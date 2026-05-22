@@ -13,6 +13,7 @@ import { initFTS, runMigrations, initNewTables, bootstrapSchema } from "./db.js"
 import { userStore, settingsStore, projectStore, conversationStore, getProjectsRoot } from "./storage.js";
 import { isTlsEnabled, ensureCerts } from "./lib/tls-cert.js";
 import { dockerManager } from "./docker/manager.js";
+import { syncNginxForRunningApps } from "./lib/nginx-apps.js";
 import { installLogCapture } from "./lib/log-buffer.js";
 import { connectAllEnabledMcpServers } from "./lib/mcp-client.js";
 import { startScheduler } from "./lib/background-tasks.js";
@@ -160,6 +161,17 @@ async function init() {
   // Initialize Docker manager
   await dockerManager.init();
 
+  // Sync nginx configs for any apps that were running before this restart.
+  // Docker containers survive Agent2077 restarts, but nginx conf files may
+  // have been lost. This restores them so agent2077.local:<port> keeps working.
+  try {
+    const { appStore: as } = await import("./storage.js");
+    const runningApps = as.getAll().filter((a: any) => a.status === "running");
+    syncNginxForRunningApps(runningApps);
+  } catch (err: any) {
+    console.warn("[Init] nginx sync failed:", err.message);
+  }
+
   // Register API routes on a temporary http server — WebSocket handlers will be
   // re-attached to the final server (http or https) at the bottom of init()
   const tempServer = http.createServer(app);
@@ -240,6 +252,27 @@ init().catch(err => {
   console.error("[Agent2077] Fatal error during startup:", err);
   process.exit(1);
 });
+
+// ── Restart sentinel watcher ──────────────────────────────────────────────────
+// When a promote or rollback writes `.restart-requested` we exit cleanly.
+// start.sh (while loop) or systemd (Restart=always) will bring us back up.
+(function watchRestartSentinel() {
+  const sentinelPath = path.join(process.cwd(), ".restart-requested");
+
+  // Clean up any leftover sentinel from a previous restart so we don't
+  // exit immediately on startup.
+  try { fs.unlinkSync(sentinelPath); } catch { /* not present — fine */ }
+
+  // Poll every 2 s — fs.watchFile is more portable than fs.watch across Linux
+  // filesystems (tmpfs, overlayfs, etc.).
+  fs.watchFile(sentinelPath, { persistent: false, interval: 2000 }, (curr) => {
+    if (curr.nlink > 0) {
+      console.log("[Agent2077] Restart sentinel detected — exiting for restart...");
+      try { fs.unlinkSync(sentinelPath); } catch { /* ignore */ }
+      process.exit(0);
+    }
+  });
+})();
 
 // Graceful shutdown
 process.on("SIGTERM", () => { console.log("[Agent2077] Shutting down..."); process.exit(0); });

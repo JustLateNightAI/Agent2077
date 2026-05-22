@@ -346,17 +346,39 @@ export function getDevInfo(): {
   stableDir: string;
   serverStatus: string;
   serverPort: number;
+  localUrl: string;
+  networkUrl: string | null;
   lastBuild: typeof lastBuildResult;
   lastTests: typeof lastTestResult;
   logLines: string[];
   statusEvents: Array<{ message: string; detail?: string; timestamp: number }>;
 } {
+  // Resolve the LAN-accessible URL for the dev server.
+  // Uses the same logic as app-deploy.ts getAgentHostname():
+  //   1. network.devHostname setting override
+  //   2. devagent.local (mDNS alias set up by install.sh)
+  //   3. First non-loopback LAN IP
+  let networkUrl: string | null = null;
+  try {
+    const override = settingsStore.get("network.devHostname");
+    if (override && override.trim()) {
+      networkUrl = `http://${override.trim()}:${DEV_PORT}`;
+    } else {
+      // devagent.local is the dedicated mDNS alias for the dev server
+      networkUrl = `http://devagent.local:${DEV_PORT}`;
+    }
+  } catch {
+    networkUrl = null;
+  }
+
   return {
     devNumber: currentDevNumber,
     devDir: getCurrentDevDir(),
     stableDir: STABLE_DIR,
     serverStatus: devServerStatus,
     serverPort: DEV_PORT,
+    localUrl: `http://localhost:${DEV_PORT}`,
+    networkUrl,
     lastBuild: lastBuildResult,
     lastTests: lastTestResult,
     logLines: devServerLog.slice(-50),
@@ -1225,3 +1247,277 @@ export async function httpRequest(method: string, urlPath: string, body?: any): 
 }
 
 export { DEV_BASE, STABLE_DIR, DEV_PORT, SCREENSHOTS_DIR };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PROMOTE & ROLLBACK
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const RELEASES_DIR = path.join(DEV_BASE, "releases");
+
+export interface ReleaseManifest {
+  id: string;          // e.g. "2026-05-22T14-30-00-custom"
+  label: string;       // human label, e.g. "Before promoting dev-003"
+  timestamp: string;   // ISO 8601
+  devNumber: number | null;  // which dev session was promoted (null = pre-promote snapshot)
+  type: "pre-promote" | "manual";  // why this snapshot was taken
+  dir: string;         // absolute path to the snapshot dir
+}
+
+/**
+ * Snapshot the current production install (AGENT_ROOT) to a timestamped
+ * directory inside ~/agent2077-dev/releases/. Returns the manifest.
+ * Does NOT touch data/ — only source files.
+ */
+export function snapshotProduction(
+  label: string,
+  devNumber: number | null,
+  type: ReleaseManifest["type"] = "pre-promote",
+  onProgress?: (msg: string) => void
+): ReleaseManifest {
+  if (!fs.existsSync(RELEASES_DIR)) fs.mkdirSync(RELEASES_DIR, { recursive: true });
+
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("Z", "");
+  const id = `${ts}-${label.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`;
+  const dir = path.join(RELEASES_DIR, id);
+
+  onProgress?.(`Taking snapshot of production into releases/${id} ...`);
+  copySource(AGENT_ROOT, dir);
+
+  const manifest: ReleaseManifest = { id, label, timestamp: new Date().toISOString(), devNumber, type, dir };
+  fs.writeFileSync(path.join(dir, ".release-manifest.json"), JSON.stringify(manifest, null, 2));
+
+  onProgress?.(`Snapshot saved: ${id}`);
+  return manifest;
+}
+
+/**
+ * List all snapshots in ~/agent2077-dev/releases/, newest first.
+ */
+export function listReleases(): ReleaseManifest[] {
+  if (!fs.existsSync(RELEASES_DIR)) return [];
+  return fs.readdirSync(RELEASES_DIR)
+    .filter(name => fs.statSync(path.join(RELEASES_DIR, name)).isDirectory())
+    .map(name => {
+      const manifestPath = path.join(RELEASES_DIR, name, ".release-manifest.json");
+      if (!fs.existsSync(manifestPath)) return null;
+      try { return JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as ReleaseManifest; }
+      catch { return null; }
+    })
+    .filter((m): m is ReleaseManifest => m !== null)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+/**
+ * Promote a dev session to production.
+ *
+ * Steps:
+ *  1. Stop the dev server if running
+ *  2. Snapshot current AGENT_ROOT → releases/ (rollback point)
+ *  3. Copy dev dir → AGENT_ROOT (source files only, data/ excluded)
+ *  4. Optionally copy data/ from dev dir if user opted in
+ *  5. npm install in AGENT_ROOT
+ *  6. Build (npx tsx script/build.ts)
+ *  7. Signal restart (write a sentinel file — start.sh / systemd picks it up)
+ *
+ * Returns a generator of progress strings for SSE streaming.
+ */
+export async function* promoteDevToProduction(options: {
+  devNumber: number;
+  includeData: boolean;
+  includeSettings: boolean;
+  onProgress?: (msg: string) => void;
+}): AsyncGenerator<{ type: "progress" | "success" | "error"; message: string; releaseId?: string }> {
+  const { devNumber, includeData, includeSettings } = options;
+
+  const devDir = path.join(DEV_BASE, `dev-${String(devNumber).padStart(3, "0")}`);
+  if (!fs.existsSync(devDir)) {
+    yield { type: "error", message: `Dev directory not found: ${devDir}` };
+    return;
+  }
+
+  const emit = (msg: string) => { options.onProgress?.(msg); };
+
+  // 1. Stop dev server
+  yield { type: "progress", message: "Stopping dev server..." };
+  stopDevServer();
+  await new Promise(r => setTimeout(r, 500));
+
+  // 2. Snapshot production
+  yield { type: "progress", message: "Snapshotting current production version (rollback point)..." };
+  let manifest: ReleaseManifest;
+  try {
+    manifest = snapshotProduction(
+      `before-dev-${String(devNumber).padStart(3, "0")}`,
+      devNumber,
+      "pre-promote",
+      emit
+    );
+  } catch (err: any) {
+    yield { type: "error", message: `Failed to snapshot production: ${err.message}` };
+    return;
+  }
+  yield { type: "progress", message: `Snapshot saved as ${manifest.id}` };
+
+  // 3. Copy dev source → AGENT_ROOT
+  yield { type: "progress", message: "Copying custom version to production directory..." };
+  try {
+    copySource(devDir, AGENT_ROOT);
+  } catch (err: any) {
+    yield { type: "error", message: `Failed to copy dev files: ${err.message}. Your previous version is safe at releases/${manifest.id}` };
+    return;
+  }
+  yield { type: "progress", message: "Source files copied." };
+
+  // 4. Optionally copy data directory
+  if (includeData) {
+    yield { type: "progress", message: "Copying data directory (chats, settings, apps)..." };
+    const devDataDir = path.join(devDir, "data");
+    const prodDataDir = path.join(AGENT_ROOT, "data");
+    if (fs.existsSync(devDataDir)) {
+      try {
+        fs.cpSync(devDataDir, prodDataDir, { recursive: true });
+        yield { type: "progress", message: "Data directory copied." };
+      } catch (err: any) {
+        // Non-fatal — warn and continue
+        yield { type: "progress", message: `Warning: could not copy data directory: ${err.message}. Continuing with existing data.` };
+      }
+    } else {
+      yield { type: "progress", message: "No data directory in dev session — keeping existing production data." };
+    }
+  } else {
+    yield { type: "progress", message: "Keeping existing production data (chats and settings preserved)." };
+  }
+
+  // 5. npm install (include devDependencies — esbuild, vite, tsx are needed for the build step)
+  yield { type: "progress", message: "Installing dependencies (npm install)..." };
+  try {
+    const nodeEnv = resolveNodeEnv();
+    execSync("npm install", {
+      cwd: AGENT_ROOT,
+      timeout: 180000,
+      stdio: "pipe",
+      env: { ...nodeEnv, NODE_ENV: "development" }, // development so devDeps are installed
+    });
+    yield { type: "progress", message: "Dependencies installed." };
+  } catch (err: any) {
+    const stdout = String(err.stdout || "").trim();
+    const stderr = String(err.stderr || "").trim();
+    const combined = [stdout, stderr].filter(Boolean).join("\n") || err.message || "(no output)";
+    const trimmed = combined.length > 5000 ? "..." + combined.slice(-5000) : combined;
+    yield { type: "error", message: `npm install failed:\n\n${trimmed}` };
+    yield { type: "error", message: `\u21b3 Rollback available: ${manifest.id}` };
+    return;
+  }
+
+  // 6. Build
+  yield { type: "progress", message: "Building production bundle (npx tsx script/build.ts)..." };
+  try {
+    const nodeEnv = resolveNodeEnv();
+    execSync("npx tsx script/build.ts", {
+      cwd: AGENT_ROOT,
+      timeout: 180000,
+      stdio: "pipe",
+      env: nodeEnv,
+      shell: true,
+    });
+    yield { type: "progress", message: "Build complete." };
+  } catch (err: any) {
+    // Collect all available output — operator precedence fix: concatenate strings first
+    const stdout = String(err.stdout || "").trim();
+    const stderr = String(err.stderr || "").trim();
+    const combined = [stdout, stderr].filter(Boolean).join("\n") || err.message || "(no output)";
+    // Show the last 5000 chars so the relevant error is always visible
+    const trimmed = combined.length > 5000 ? "..." + combined.slice(-5000) : combined;
+    yield { type: "error", message: `Build failed:\n\n${trimmed}` };
+    yield { type: "error", message: `\u21b3 Rollback available: ${manifest.id}` };
+    return;
+  }
+
+  // 7. Write restart sentinel — Agent2077 watches for this file and restarts itself
+  const sentinelPath = path.join(AGENT_ROOT, ".restart-requested");
+  fs.writeFileSync(sentinelPath, new Date().toISOString());
+
+  yield {
+    type: "success",
+    message: `Promotion complete! Agent2077 is restarting with your custom version. Rollback available as: ${manifest.id}`,
+    releaseId: manifest.id,
+  };
+}
+
+/**
+ * Roll back production to a previously snapshotted release.
+ * Same flow as promote but in reverse: snapshot current state first, then restore.
+ */
+export async function* rollbackToRelease(releaseId: string): AsyncGenerator<{
+  type: "progress" | "success" | "error";
+  message: string;
+}> {
+  const releaseDir = path.join(RELEASES_DIR, releaseId);
+  if (!fs.existsSync(releaseDir)) {
+    yield { type: "error", message: `Release not found: ${releaseId}` };
+    return;
+  }
+
+  // Snapshot current state before rolling back (so you can undo the undo)
+  yield { type: "progress", message: "Snapshotting current state before rollback..." };
+  try {
+    snapshotProduction(`before-rollback-to-${releaseId.slice(0, 20)}`, null, "pre-promote");
+  } catch (err: any) {
+    yield { type: "progress", message: `Warning: could not pre-snapshot: ${err.message}. Continuing rollback.` };
+  }
+
+  yield { type: "progress", message: `Restoring release ${releaseId}...` };
+  try {
+    copySource(releaseDir, AGENT_ROOT);
+  } catch (err: any) {
+    yield { type: "error", message: `Failed to restore release: ${err.message}` };
+    return;
+  }
+  yield { type: "progress", message: "Files restored." };
+
+  yield { type: "progress", message: "Installing dependencies..." };
+  try {
+    const nodeEnv = resolveNodeEnv();
+    // NODE_ENV=development so devDependencies (esbuild, vite, tsx) are installed for the build step
+    execSync("npm install", { cwd: AGENT_ROOT, timeout: 180000, stdio: "pipe", env: { ...nodeEnv, NODE_ENV: "development" } });
+  } catch (err: any) {
+    const stdout = String(err.stdout || "").trim();
+    const stderr = String(err.stderr || "").trim();
+    const combined = [stdout, stderr].filter(Boolean).join("\n") || err.message || "(no output)";
+    const trimmed = combined.length > 5000 ? "..." + combined.slice(-5000) : combined;
+    yield { type: "error", message: `npm install failed after rollback:\n\n${trimmed}` };
+    return;
+  }
+
+  yield { type: "progress", message: "Building..." };
+  try {
+    const nodeEnv = resolveNodeEnv();
+    execSync("npx tsx script/build.ts", { cwd: AGENT_ROOT, timeout: 180000, stdio: "pipe", env: nodeEnv, shell: true });
+  } catch (err: any) {
+    const stdout = String(err.stdout || "").trim();
+    const stderr = String(err.stderr || "").trim();
+    const combined = [stdout, stderr].filter(Boolean).join("\n") || err.message || "(no output)";
+    const trimmed = combined.length > 5000 ? "..." + combined.slice(-5000) : combined;
+    yield { type: "error", message: `Build failed after rollback:\n\n${trimmed}` };
+    return;
+  }
+
+  const sentinelPath = path.join(AGENT_ROOT, ".restart-requested");
+  fs.writeFileSync(sentinelPath, new Date().toISOString());
+
+  yield { type: "success", message: `Rolled back to ${releaseId}. Agent2077 is restarting.` };
+}
+
+/**
+ * Delete a release snapshot to free up disk space.
+ */
+export function deleteRelease(releaseId: string): { success: boolean; message: string } {
+  const releaseDir = path.join(RELEASES_DIR, releaseId);
+  if (!fs.existsSync(releaseDir)) return { success: false, message: `Release not found: ${releaseId}` };
+  try {
+    fs.rmSync(releaseDir, { recursive: true, force: true });
+    return { success: true, message: `Deleted release ${releaseId}` };
+  } catch (err: any) {
+    return { success: false, message: err.message };
+  }
+}

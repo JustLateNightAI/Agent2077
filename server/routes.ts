@@ -27,6 +27,7 @@ import { getRecentInspectorEntries, addInspectorClient, removeInspectorClient } 
 import { planTask, type TaskPlan } from "./lib/task-planner.js";
 import { syncModels, pingEndpoint, cancelRequest, type ChatMessage } from "./lib/llm-client.js";
 import { dockerManager } from "./docker/manager.js";
+import { registerAppPort, unregisterAppPort } from "./lib/nginx-apps.js";
 import { DB_PATH } from "./db.js";
 import { chatCompletion } from "./lib/llm-client.js";
 import { subscribe, broadcast, markActive, markInactive, isActive } from "./lib/conversation-bus.js";
@@ -38,6 +39,7 @@ import { pendingResetPermissions } from "./tools/self-dev-tools.js";
 import {
   getDevInfo, readDevFile, listDevFiles, initDevSession, buildDev,
   startDevServer, stopDevServer, DEV_BASE, pushStatusEvent, clearStatusEvents, diffFile,
+  promoteDevToProduction, listReleases, rollbackToRelease, deleteRelease,
 } from "./lib/dev-workspace.js";
 import { runAllTests, getTestSummary } from "./lib/self-dev-tests.js";
 import { buildSelfDevPrompt, buildScreenshotAnalysisPrompt } from "./lib/self-dev-prompt.js";
@@ -796,13 +798,16 @@ export function registerRoutes(server: http.Server, app: Express) {
 
     try {
       const { dockerfile, buildContext } = req.body;
+      const port = app2.port || appStore.getNextPort();
       const result = await dockerManager.deployApp(
         id,
         dockerfile || app2.dockerfile || "",
         buildContext || app2.buildPath || "",
-        app2.port || appStore.getNextPort(),
+        port,
         app2.internalPort,
       );
+      // App is now running — register nginx proxy so it's reachable on LAN
+      registerAppPort(port);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -811,7 +816,11 @@ export function registerRoutes(server: http.Server, app: Express) {
 
   app.post("/api/apps/:id/start", async (req, res) => {
     try {
-      await dockerManager.startApp(parseInt(req.params.id));
+      const appId = parseInt(req.params.id);
+      await dockerManager.startApp(appId);
+      // Register nginx proxy so agent2077.local:<port> resolves on the LAN
+      const startedApp = appStore.getById(appId);
+      if (startedApp?.port) registerAppPort(startedApp.port);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -820,7 +829,12 @@ export function registerRoutes(server: http.Server, app: Express) {
 
   app.post("/api/apps/:id/stop", async (req, res) => {
     try {
-      await dockerManager.stopApp(parseInt(req.params.id));
+      const appId = parseInt(req.params.id);
+      // Fetch port before stopping (it's cleared after stop in some paths)
+      const stoppingApp = appStore.getById(appId);
+      await dockerManager.stopApp(appId);
+      // Remove nginx proxy for this port
+      if (stoppingApp?.port) unregisterAppPort(stoppingApp.port);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -926,12 +940,17 @@ export function registerRoutes(server: http.Server, app: Express) {
   });
 
   app.delete("/api/apps/:id", async (req, res) => {
+    const appId = parseInt(req.params.id);
+    // Capture port before removal so we can clean up the nginx config
+    const deletingApp = appStore.getById(appId);
     try {
-      await dockerManager.removeApp(parseInt(req.params.id));
+      await dockerManager.removeApp(appId);
+      if (deletingApp?.port) unregisterAppPort(deletingApp.port);
       res.json({ success: true });
     } catch (err: any) {
       // If Docker container is already gone, still clean up the DB entry
-      try { appStore.delete(parseInt(req.params.id)); } catch { }
+      try { appStore.delete(appId); } catch { }
+      if (deletingApp?.port) unregisterAppPort(deletingApp.port);
       res.json({ success: true });
     }
   });
@@ -2855,6 +2874,84 @@ CMD ["node", "index.js"]`;
       const filePath = req.query.path as string;
       if (!filePath) return res.status(400).json({ error: "path required" });
       const result = diffFile(filePath);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Promote & Rollback ──────────────────────────────────────────────────────────────────
+
+  // GET /api/self-dev/releases — list all production snapshots
+  app.get("/api/self-dev/releases", (_req, res) => {
+    try {
+      res.json(listReleases());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/self-dev/promote — promote current dev session to production
+  // Body: { devNumber: number, includeData: boolean, includeSettings: boolean }
+  // Streams SSE events: { type, message, releaseId? }
+  app.post("/api/self-dev/promote", async (req, res) => {
+    const { devNumber, includeData = false, includeSettings = false } = req.body;
+    if (typeof devNumber !== "number") {
+      return res.status(400).json({ error: "devNumber (number) required" });
+    }
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    const send = (event: object) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    try {
+      for await (const event of promoteDevToProduction({ devNumber, includeData, includeSettings })) {
+        send(event);
+        if (event.type === "success" || event.type === "error") break;
+      }
+    } catch (err: any) {
+      send({ type: "error", message: err.message });
+    } finally {
+      res.end();
+    }
+  });
+
+  // POST /api/self-dev/rollback — roll back production to a prior release
+  // Body: { releaseId: string }
+  app.post("/api/self-dev/rollback", async (req, res) => {
+    const { releaseId } = req.body;
+    if (!releaseId) return res.status(400).json({ error: "releaseId required" });
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    const send = (event: object) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    try {
+      for await (const event of rollbackToRelease(releaseId)) {
+        send(event);
+        if (event.type === "success" || event.type === "error") break;
+      }
+    } catch (err: any) {
+      send({ type: "error", message: err.message });
+    } finally {
+      res.end();
+    }
+  });
+
+  // DELETE /api/self-dev/releases/:id — delete a snapshot to free disk space
+  app.delete("/api/self-dev/releases/:id", (req, res) => {
+    try {
+      const result = deleteRelease(req.params.id);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });

@@ -2,15 +2,6 @@
   "name": "agent2077",
   "version": "1.0.0",
   "private": true,
-  "license": "AGPL-3.0-only",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/JustLateNightAI/Agent2077.git"
-  },
-  "bugs": {
-    "url": "https://github.com/JustLateNightAI/Agent2077/issues"
-  },
-  "homepage": "https://github.com/JustLateNightAI/Agent2077#readme",
   "type": "module",
   "scripts": {
     "dev": "NODE_ENV=development tsx watch server/index.ts",

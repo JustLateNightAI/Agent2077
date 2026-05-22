@@ -4,41 +4,155 @@
  */
 import { registerTool, type ToolResult, type ToolContext } from "./registry.js";
 import { dockerManager } from "../docker/manager.js";
-import { appStore } from "../storage.js";
+import { appStore, settingsStore } from "../storage.js";
+import { registerAppPort } from "../lib/nginx-apps.js";
 import path from "path";
 import fs from "fs";
+import os from "os";
+
+/**
+ * Resolve the hostname that apps should be advertised on.
+ *
+ * Priority:
+ *  1. Explicit setting: "network.appHostname" (user-configurable)
+ *  2. The mDNS hostname this server is reachable on (agent2077.local if avahi
+ *     or Bonjour is active; falls back to the machine hostname + ".local")
+ *  3. The primary LAN IP address
+ *  4. "localhost" as last resort
+ *
+ * This ensures app URLs shown in the App Store and tool output are reachable
+ * from any device on the local network, not just from the server itself.
+ */
+function getAgentHostname(): string {
+  // 1. Explicit override in settings
+  const override = settingsStore.get("network.appHostname");
+  if (override && override.trim()) return override.trim();
+
+  // 2. Try the mDNS hostname: <hostname>.local
+  //    This works when avahi (Linux) or Bonjour (macOS/Windows) is running,
+  //    which is exactly the setup that makes "agent2077.local" work.
+  try {
+    const mdnsHost = os.hostname().replace(/\.local$/, "") + ".local";
+    return mdnsHost;
+  } catch { /* fall through */ }
+
+  // 3. Primary LAN IP — iterate network interfaces, pick first non-loopback IPv4
+  try {
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      const addrs = ifaces[name] || [];
+      for (const addr of addrs) {
+        if (addr.family === "IPv4" && !addr.internal) {
+          return addr.address;
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  return "localhost";
+}
 
 const WORKSPACE_DIR = path.join(process.cwd(), "workspace");
 const APPS_DIR = path.join(WORKSPACE_DIR, "apps");
 
-// Default Dockerfile for static HTML/JS apps served by nginx
-function staticDockerfile(entryFile: string = "index.html"): string {
-  return `FROM nginx:alpine
-COPY . /usr/share/nginx/html/
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]`;
+/**
+ * Generate a Dockerfile for a static HTML/JS/CSS app served by nginx.
+ * Port is always 80 inside the container.
+ */
+function staticDockerfile(): string {
+  return [
+    "FROM nginx:alpine",
+    "COPY . /usr/share/nginx/html/",
+    "EXPOSE 80",
+    'CMD ["nginx", "-g", "daemon off;"]',
+  ].join("\n");
 }
 
-// Dockerfile for Node.js apps
-function nodeDockerfile(entryFile: string = "server.js"): string {
-  return `FROM node:22-slim
-WORKDIR /app
-COPY package*.json ./
-RUN npm install --production 2>/dev/null || true
-COPY . .
-EXPOSE 8080
-CMD ["node", "${entryFile}"]`;
+/**
+ * Generate a Dockerfile for a Node.js app.
+ * Handles both with-package.json and bare-script cases cleanly.
+ * Port must match what the app actually listens on.
+ */
+function nodeDockerfile(entryFile: string, port: number, hasPackageJson: boolean): string {
+  const lines = [
+    "FROM node:22-slim",
+    "WORKDIR /app",
+  ];
+  if (hasPackageJson) {
+    lines.push("COPY package*.json ./");
+    lines.push("RUN npm install --production"); // no || true — fail loudly if deps missing
+  }
+  lines.push("COPY . .");
+  lines.push(`EXPOSE ${port}`);
+  lines.push(`CMD ["node", "${entryFile}"]`);
+  return lines.join("\n");
 }
 
-// Dockerfile for Python apps
-function pythonDockerfile(entryFile: string = "app.py"): string {
-  return `FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt ./
-RUN pip install -r requirements.txt 2>/dev/null || true
-COPY . .
-EXPOSE 8080
-CMD ["python", "${entryFile}"]`;
+/**
+ * Generate a Dockerfile for a Python app.
+ * Port must match what the app actually listens on.
+ */
+function pythonDockerfile(entryFile: string, port: number, hasRequirements: boolean): string {
+  const lines = [
+    "FROM python:3.12-slim",
+    "WORKDIR /app",
+  ];
+  if (hasRequirements) {
+    lines.push("COPY requirements.txt ./");
+    lines.push("RUN pip install --no-cache-dir -r requirements.txt"); // fail loudly
+  }
+  lines.push("COPY . .");
+  lines.push(`EXPOSE ${port}`);
+  lines.push(`CMD ["python", "${entryFile}"]`);
+  return lines.join("\n");
+}
+
+/**
+ * Inspect a build directory and auto-detect the best app type + port.
+ * Used when the agent specifies type='static' but the directory has a server file,
+ * or to resolve the correct internal port without requiring the model to specify it.
+ */
+function detectAppConfig(dir: string, declaredType: string, declaredEntry?: string, declaredPort?: number): {
+  type: string;
+  entryFile: string;
+  internalPort: number;
+  hasPackageJson: boolean;
+  hasRequirements: boolean;
+} {
+  const entries = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  const hasIndexHtml    = entries.includes("index.html");
+  const hasServerJs     = entries.includes("server.js")  || entries.includes("index.js") || entries.includes("app.js");
+  const hasPackageJson  = entries.includes("package.json");
+  const hasRequirements = entries.includes("requirements.txt");
+  const hasAppPy        = entries.includes("app.py") || entries.includes("main.py");
+
+  let type = declaredType;
+
+  // Auto-promote: if declared static but directory has no index.html and has server.js → node
+  if (type === "static" && !hasIndexHtml && hasServerJs) {
+    type = "node";
+  }
+  // Auto-detect: if declared node but directory only has index.html → static
+  if (type === "node" && !hasServerJs && hasIndexHtml) {
+    type = "static";
+  }
+
+  if (type === "static") {
+    return { type: "static", entryFile: "index.html", internalPort: 80, hasPackageJson: false, hasRequirements: false };
+  }
+
+  if (type === "python") {
+    const entry = declaredEntry || (entries.includes("app.py") ? "app.py" : "main.py");
+    const port  = declaredPort || 8080;
+    return { type: "python", entryFile: entry, internalPort: port, hasPackageJson: false, hasRequirements };
+  }
+
+  // node (default)
+  const candidateEntries = ["server.js", "index.js", "app.js", "main.js"];
+  const foundEntry = candidateEntries.find(e => entries.includes(e));
+  const entry = declaredEntry || foundEntry || "server.js";
+  const port  = declaredPort || 8080;
+  return { type: "node", entryFile: entry, internalPort: port, hasPackageJson, hasRequirements: false };
 }
 
 registerTool("deploy_app", {
@@ -49,7 +163,7 @@ registerTool("deploy_app", {
     function: {
       name: "deploy_app",
       description:
-        "Deploy a web application to the Agent2077 App Store. ONLY use this when the user EXPLICITLY asks you to build, create, or deploy an app/game/tool. Do NOT call this tool unless the user's message specifically requests an app. This is NOT for generating images, answering questions, writing code snippets, or any other task. When building apps, aim for professional production quality — clean UI, proper error handling, responsive design, no placeholder content.",
+        "Deploy a web application to the Agent2077 App Store. ONLY use this when the user EXPLICITLY asks you to build, create, or deploy an app/game/tool. Do NOT call this tool unless the user's message specifically requests an app. This is NOT for generating images, answering questions, writing code snippets, or any other task. When building apps, aim for professional production quality — clean UI, proper error handling, responsive design, no placeholder content.\n\nPREFERRED WORKFLOW: Write all app files to the workspace first using write_file (e.g. write to /apps/my-app/index.html, /apps/my-app/style.css, etc.), then call deploy_app with sourcePath pointing to that directory. This avoids JSON size limits. Only use the inline 'files' parameter for very small single-file apps.",
       parameters: {
         type: "object",
         properties: {
@@ -73,10 +187,15 @@ registerTool("deploy_app", {
             description:
               "App type: 'static' for HTML/JS/CSS, 'node' for Node.js, 'python' for Python, 'custom' for a provided Dockerfile",
           },
+          sourcePath: {
+            type: "string",
+            description:
+              "PREFERRED: Workspace-relative path to a directory containing the app files you already wrote with write_file. Example: 'apps/todo-app'. The directory must already exist and contain the app files. Use this instead of 'files' for any app with more than one file or significant code.",
+          },
           files: {
             type: "object",
             description:
-              "Object mapping file paths to file contents. Example: { 'index.html': '<html>...</html>', 'style.css': 'body { ... }', 'app.js': 'console.log(...)' }",
+              "Inline file contents as an object mapping paths to content. Only use for very small single-file apps. For anything larger, write files with write_file first and use sourcePath instead to avoid JSON truncation errors.",
           },
           icon: {
             type: "string",
@@ -96,7 +215,7 @@ registerTool("deploy_app", {
             description: "Port the app listens on inside the container (default: 80 for static, 8080 for node/python)",
           },
         },
-        required: ["name", "description", "type", "files"],
+        required: ["name", "description", "type"],
       },
     },
   },
@@ -106,6 +225,7 @@ registerTool("deploy_app", {
       category = "tool",
       type,
       files,
+      sourcePath,
       icon = "📦",
       entryFile,
       dockerfile: customDockerfile,
@@ -115,6 +235,35 @@ registerTool("deploy_app", {
     const description: string = typeof args.description === "string"
       ? args.description.slice(0, 120)
       : String(args.description || "").slice(0, 120);
+
+    // Validate: need either files or sourcePath
+    if (!files && !sourcePath) {
+      return {
+        success: false,
+        output: `deploy_app requires either 'files' (inline content) or 'sourcePath' (workspace directory path).\n` +
+          `PREFERRED: Write your app files to the workspace first using write_file, then call deploy_app with sourcePath.\n` +
+          `Example: write files to 'apps/${name?.toLowerCase().replace(/[^a-z0-9]/g, '-') || 'my-app'}/' then set sourcePath to that path.`,
+      };
+    }
+
+    // Resolve sourcePath to an absolute path if provided
+    let resolvedSourcePath: string | null = null;
+    if (sourcePath) {
+      const WORKSPACE_ROOT = path.join(process.cwd(), "workspace");
+      // Strip leading slash if provided
+      const cleanedPath = String(sourcePath).replace(/^\/+/, "");
+      resolvedSourcePath = path.resolve(WORKSPACE_ROOT, cleanedPath);
+      // Safety: must stay inside workspace
+      if (!resolvedSourcePath.startsWith(WORKSPACE_ROOT)) {
+        return { success: false, output: `sourcePath '${sourcePath}' is outside the workspace directory.` };
+      }
+      if (!fs.existsSync(resolvedSourcePath)) {
+        return { success: false, output: `sourcePath '${sourcePath}' does not exist. Write your app files there first using write_file.` };
+      }
+      if (!fs.statSync(resolvedSourcePath).isDirectory()) {
+        return { success: false, output: `sourcePath '${sourcePath}' is a file, not a directory. Point it at the folder containing your app files.` };
+      }
+    }
 
     // Check Docker is available
     if (!dockerManager.isReady()) {
@@ -128,38 +277,16 @@ registerTool("deploy_app", {
     let app: any = null;
 
     try {
-      // 1. Determine defaults based on type
-      let defaultEntry: string;
-      let defaultPort: number;
-      let dockerfileContent: string;
-
-      switch (type) {
-        case "static":
-          defaultEntry = entryFile || "index.html";
-          defaultPort = customPort || 80;
-          dockerfileContent = customDockerfile || staticDockerfile(defaultEntry);
-          break;
-        case "node":
-          defaultEntry = entryFile || "server.js";
-          defaultPort = customPort || 8080;
-          dockerfileContent = customDockerfile || nodeDockerfile(defaultEntry);
-          break;
-        case "python":
-          defaultEntry = entryFile || "app.py";
-          defaultPort = customPort || 8080;
-          dockerfileContent = customDockerfile || pythonDockerfile(defaultEntry);
-          break;
-        case "custom":
-          if (!customDockerfile) {
-            return { success: false, output: "Custom type requires a 'dockerfile' parameter" };
-          }
-          defaultEntry = entryFile || "index.html";
-          defaultPort = customPort || 8080;
-          dockerfileContent = customDockerfile;
-          break;
-        default:
-          return { success: false, output: `Unknown app type: ${type}. Use: static, node, python, or custom` };
+      // 1. For custom type, require a dockerfile upfront before touching the FS
+      if (type === "custom" && !customDockerfile) {
+        return { success: false, output: "type='custom' requires a 'dockerfile' parameter." };
       }
+
+      // Dockerfile content is determined after we know the build directory
+      // (detectAppConfig inspects the actual files on disk). Declare here,
+      // assign after files are in place in step 4.
+      let dockerfileContent: string;
+      let defaultPort: number;  // resolved after detection
 
       // 2. Check if an app with this name already exists — UPDATE instead of duplicate
       const existing = appStore.getByName(name);
@@ -220,9 +347,9 @@ registerTool("deploy_app", {
           category,
           imageName: `agent2077-app-${name.toLowerCase().replace(/[^a-z0-9]/g, "-")}`,
           port: hostPort,
-          internalPort: defaultPort,
+          internalPort: 80,         // placeholder — overwritten after file detection in step 5a
           status: "building",
-          dockerfile: dockerfileContent,
+          dockerfile: "",            // placeholder — overwritten after file detection in step 5a
           iconEmoji: icon,
           createdByConversation: context.conversationId,
         });
@@ -242,8 +369,28 @@ registerTool("deploy_app", {
       }
       if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
 
-      // Write all provided files
-      if (files && typeof files === "object") {
+      if (resolvedSourcePath) {
+        // sourcePath mode: copy all files from the workspace directory into the build dir
+        const { execSync: cpSync } = await import("child_process");
+        try {
+          cpSync(
+            `cp -a ${JSON.stringify(resolvedSourcePath + "/")}. ${JSON.stringify(buildDir + "/")}`,
+            { stdio: "pipe" }
+          );
+          console.log(`[AppDeploy] Copied source from ${resolvedSourcePath} → ${buildDir}`);
+        } catch (cpErr: any) {
+          // fallback to rsync
+          try {
+            cpSync(
+              `rsync -a --exclude=node_modules --exclude=.git ${JSON.stringify(resolvedSourcePath + "/")} ${JSON.stringify(buildDir + "/")}`,
+              { stdio: "pipe" }
+            );
+          } catch {
+            return { success: false, output: `Failed to copy source files from '${sourcePath}' to build directory: ${cpErr.message}` };
+          }
+        }
+      } else if (files && typeof files === "object") {
+        // Inline files mode: write each file from the args object
         for (const [filePath, content] of Object.entries(files)) {
           const fullPath = path.join(buildDir, filePath);
           const dir = path.dirname(fullPath);
@@ -252,20 +399,55 @@ registerTool("deploy_app", {
         }
       }
 
-      // Write Dockerfile
+      // 5a. Detect app config from actual files on disk — this is the source of truth.
+      //     We do this AFTER files are written so detectAppConfig can inspect them.
+      if (type === "custom") {
+        dockerfileContent = customDockerfile!;
+        defaultPort = customPort || 8080;
+      } else {
+        const detected = detectAppConfig(buildDir, type, entryFile, customPort);
+        switch (detected.type) {
+          case "static":
+            dockerfileContent = staticDockerfile();
+            break;
+          case "python":
+            dockerfileContent = pythonDockerfile(detected.entryFile, detected.internalPort, detected.hasRequirements);
+            break;
+          default: // node
+            dockerfileContent = nodeDockerfile(detected.entryFile, detected.internalPort, detected.hasPackageJson);
+            break;
+        }
+        defaultPort = detected.internalPort;
+        console.log(`[AppDeploy] Detected: type=${detected.type}, entry=${detected.entryFile}, port=${detected.internalPort}, hasPackageJson=${detected.hasPackageJson}`);
+      }
+
+      // Write Dockerfile — always overwrite so it always matches reality
       fs.writeFileSync(path.join(buildDir, "Dockerfile"), dockerfileContent);
 
-      // 5. Deploy via Docker manager (builds image + starts container for testing)
+      // Update DB with the correct detected internalPort and final dockerfile
+      appStore.update(app.id, { internalPort: defaultPort, dockerfile: dockerfileContent });
+
+      // 5b. Deploy via Docker manager (builds image + starts container for testing)
+      // Bind to 0.0.0.0 so the app is reachable from the local network
+      // (e.g. via agent2077.local:<port>) and not just from localhost.
       const result = await dockerManager.deployApp(
         app.id,
         dockerfileContent,
         buildDir,
         hostPort,
-        existing ? existing.internalPort : defaultPort
+        defaultPort,  // always use freshly-detected port, not stale DB value
+        "0.0.0.0"  // bindHost — bind to all interfaces, not just 127.0.0.1
       );
 
       // 6. App is now running for testing
-      const testUrl = `http://localhost:${hostPort}`;
+      // Register nginx proxy so it's reachable via agent2077.local:<port> on LAN
+      registerAppPort(hostPort);
+
+      // Resolve the hostname Agent2077 is reachable on so the URL works from
+      // any device on the local network, not just from the server itself.
+      const hostname = getAgentHostname();
+      const networkUrl = `http://${hostname}:${hostPort}`;
+      const localUrl   = `http://localhost:${hostPort}`;
       const versionStr = isUpdate ? ` (v${oldVersion + 1}, updated from v${oldVersion})` : "";
 
       return {
@@ -273,15 +455,17 @@ registerTool("deploy_app", {
         output: `App "${name}" ${isUpdate ? "updated" : "built"} and deployed successfully!${versionStr}\n` +
           `  Status: running (for testing)\n` +
           `  Port: ${hostPort}\n` +
-          `  Test URL: ${testUrl}\n` +
+          `  Local URL:   ${localUrl}\n` +
+          `  Network URL: ${networkUrl}\n` +
           `  Container: ${result.containerId.slice(0, 12)}\n` +
           (isUpdate ? `  Previous version backed up as v${oldVersion} (up to 3 versions kept)\n` : "") +
           `\nThe app is now running so you can verify it works. ` +
+          `It is accessible from any device on the local network at ${networkUrl}. ` +
           `When you're done testing, call stop_app to stop it. ` +
           `The user will launch it from the App Store when they want to use it.\n` +
           `\nIMPORTANT: After confirming the app works correctly, call stop_app with appId ${app.id} ` +
           `so it appears as 'stopped' in the App Store for the user to launch on demand.`,
-        metadata: { appId: app.id, port: hostPort, containerId: result.containerId, version: isUpdate ? oldVersion + 1 : 1 },
+        metadata: { appId: app.id, port: hostPort, networkUrl, localUrl, containerId: result.containerId, version: isUpdate ? oldVersion + 1 : 1 },
       };
     } catch (err: any) {
       // On failure for NEW apps: clean up DB entry + build dir
@@ -449,7 +633,8 @@ registerTool("rollback_app", {
             app.dockerfile,
             buildDir,
             app.port!,
-            app.internalPort
+            app.internalPort,
+            "0.0.0.0"  // bindHost — bind to all interfaces for LAN access
           );
           // Stop after rebuild so it's ready to launch
           await dockerManager.stopApp(appId);

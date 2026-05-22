@@ -12,6 +12,7 @@ const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
+// ── Create all tables ───────────────────────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,10 +40,26 @@ db.exec(`
     type TEXT NOT NULL DEFAULT 'llm',
     params_string TEXT,
     quantization TEXT,
+    max_context_length INTEGER,
+    loaded_context_length INTEGER,
+    preferred_context_length INTEGER,
     is_enabled INTEGER NOT NULL DEFAULT 0,
+    is_sub_agent INTEGER NOT NULL DEFAULT 0,
     task_assignment TEXT,
     supports_tool_calling INTEGER NOT NULL DEFAULT 0,
+    supports_vision INTEGER NOT NULL DEFAULT 0,
+    temperature REAL,
+    top_p REAL,
+    thinking_enabled INTEGER NOT NULL DEFAULT 0,
     notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS chat_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    color TEXT,
+    order_index INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -51,6 +68,8 @@ db.exec(`
     title TEXT NOT NULL DEFAULT 'New Chat',
     system_prompt TEXT,
     is_archived INTEGER NOT NULL DEFAULT 0,
+    group_id INTEGER REFERENCES chat_groups(id),
+    parent_session_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -205,6 +224,99 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    path TEXT NOT NULL,
+    language TEXT,
+    conversation_id INTEGER REFERENCES conversations(id),
+    status TEXT NOT NULL DEFAULT 'active',
+    last_opened_file TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS mcp_servers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    command TEXT NOT NULL,
+    args TEXT,
+    env_vars TEXT,
+    transport_type TEXT NOT NULL DEFAULT 'stdio',
+    sse_url TEXT,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'disconnected',
+    last_error TEXT,
+    tool_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS background_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    type TEXT NOT NULL DEFAULT 'one-shot',
+    cron_expression TEXT,
+    result TEXT,
+    progress INTEGER NOT NULL DEFAULT 0,
+    logs TEXT,
+    conversation_id INTEGER,
+    model_id TEXT,
+    endpoint_id INTEGER,
+    error TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    next_run_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS generated_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt TEXT NOT NULL,
+    negative_prompt TEXT,
+    model TEXT,
+    workflow_id INTEGER,
+    workflow_json TEXT,
+    seed INTEGER,
+    width INTEGER,
+    height INTEGER,
+    steps INTEGER,
+    cfg REAL,
+    sampler TEXT,
+    scheduler TEXT,
+    denoise REAL,
+    file_path TEXT NOT NULL,
+    thumbnail_path TEXT,
+    file_size INTEGER,
+    mime_type TEXT NOT NULL DEFAULT 'image/png',
+    generation_type TEXT NOT NULL DEFAULT 'txt2img',
+    source_image_id INTEGER,
+    conversation_id INTEGER,
+    project_id INTEGER,
+    duration_ms INTEGER,
+    comfyui_prompt_id TEXT,
+    tags TEXT,
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS comfyui_workflows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    workflow_json TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'custom',
+    is_built_in INTEGER NOT NULL DEFAULT 0,
+    parameters TEXT,
+    thumbnail_path TEXT,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   -- FTS5 for memory search
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     content,
@@ -219,5 +331,35 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_subtasks_plan ON subtasks(plan_id);
 `);
 
-console.log("[DB] Schema initialized at", DB_PATH);
+// ── Migrations: add columns to existing tables ──────────────────────
+// SQLite doesn't support IF NOT EXISTS on ALTER TABLE ADD COLUMN,
+// so we check the column list first and only add if missing.
+
+function hasColumn(table: string, column: string): boolean {
+  const cols = db.pragma(`table_info(${table})`) as { name: string }[];
+  return cols.some((c) => c.name === column);
+}
+
+function addColumn(table: string, column: string, definition: string): void {
+  if (!hasColumn(table, column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    console.log(`[DB] Migration: added ${table}.${column}`);
+  }
+}
+
+// models — columns added after initial release
+addColumn("models", "max_context_length",      "INTEGER");
+addColumn("models", "loaded_context_length",   "INTEGER");
+addColumn("models", "preferred_context_length","INTEGER");
+addColumn("models", "is_sub_agent",            "INTEGER NOT NULL DEFAULT 0");
+addColumn("models", "supports_vision",         "INTEGER NOT NULL DEFAULT 0");
+addColumn("models", "temperature",             "REAL");
+addColumn("models", "top_p",                   "REAL");
+addColumn("models", "thinking_enabled",        "INTEGER NOT NULL DEFAULT 0");
+
+// conversations — columns added after initial release
+addColumn("conversations", "group_id",          "INTEGER");
+addColumn("conversations", "parent_session_id", "INTEGER");
+
+console.log("[DB] Schema initialised at", DB_PATH);
 db.close();

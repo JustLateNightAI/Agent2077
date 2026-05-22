@@ -16,6 +16,9 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 
 // ── Pixel-based drag handle (same pattern as workspace.tsx) ──────────────────
 function DragHandle({ onDragStart, onDrag }: { onDragStart: () => void; onDrag: (delta: number) => void }) {
@@ -44,10 +47,11 @@ function DragHandle({ onDragStart, onDrag }: { onDragStart: () => void; onDrag: 
 }
 import {
   Bot, User, Send, Square, Copy, Check, Loader2,
-  Play, RefreshCw, PlusCircle, ImagePlus, X,
+  Play, RefreshCw, Plus, PlusCircle, ExternalLink, ExternalLinkCircle, ImagePlus, X,
   FolderOpen, FileText, Server, CheckCircle2,
   XCircle, Clock, Terminal, Code2, Wrench,
   ChevronRight, ChevronDown, Activity, Download, Shield,
+  Rocket, RotateCcw, Trash2, AlertTriangle, History, CheckCircle,
 } from "lucide-react";
 
 // ── Error Boundary ──────────────────────────────────────────────────
@@ -106,6 +110,8 @@ interface DevStatus {
   stableDir: string;
   serverStatus: string;
   serverPort: number;
+  localUrl: string;
+  networkUrl: string | null;
   lastBuild: { success: boolean; output: string; timestamp: string } | null;
   lastTests: { passed: number; failed: number; total: number; details: string; timestamp: string } | null;
   logLines: string[];
@@ -365,34 +371,99 @@ function StatusPanel({ status, onRefresh }: { status: DevStatus | null; onRefres
             </div>
           </div>
 
-          {/* Server status */}
-          <div className="space-y-1">
+          {/* Dev Server */}
+          <div className="space-y-1.5">
             <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Dev Server</p>
-            <div className="flex items-center gap-2">
-              <StatusDot ok={serverRunning} />
-              <span className="font-mono text-xs">
-                {serverRunning ? `Running :${status?.serverPort}` : "Stopped"}
-              </span>
+
+            {/* Status + controls row */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <StatusDot ok={serverRunning} />
+                <span className="font-mono text-xs">
+                  {serverRunning ? `Running :${status?.serverPort}` : "Stopped"}
+                </span>
+              </div>
+              <div className="flex gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 text-[10px] px-2 border-green-500/30 hover:border-green-500/60 hover:bg-green-500/10"
+                  onClick={() => postAction.mutate("start-server")}
+                  disabled={postAction.isPending}
+                >
+                  <Play className="w-2.5 h-2.5 mr-1" /> Start
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 text-[10px] px-2 border-red-500/30 hover:border-red-500/60 hover:bg-red-500/10"
+                  onClick={() => postAction.mutate("stop-server")}
+                  disabled={postAction.isPending}
+                >
+                  <Square className="w-2.5 h-2.5 mr-1" /> Stop
+                </Button>
+              </div>
             </div>
-            <div className="flex gap-1.5 mt-1.5">
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-6 text-[10px] px-2 border-green-500/30 hover:border-green-500/60 hover:bg-green-500/10"
-                onClick={() => postAction.mutate("start-server")}
-                disabled={postAction.isPending}
-              >
-                <Play className="w-2.5 h-2.5 mr-1" /> Start
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-6 text-[10px] px-2 border-red-500/30 hover:border-red-500/60 hover:bg-red-500/10"
-                onClick={() => postAction.mutate("stop-server")}
-                disabled={postAction.isPending}
-              >
-                <Square className="w-2.5 h-2.5 mr-1" /> Stop
-              </Button>
+
+            {/* Preview URLs — always shown, dimmed when server is stopped */}
+            <div className={`space-y-1 rounded-md border p-2 transition-colors ${
+              serverRunning
+                ? "border-primary/30 bg-primary/5"
+                : "border-border/20 bg-black/20 opacity-50"
+            }`}>
+              <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                Preview URLs
+              </p>
+
+              {/* Local URL */}
+              <div className="flex items-center justify-between gap-1 min-w-0">
+                <div className="flex items-center gap-1 min-w-0">
+                  <span className="text-[9px] text-muted-foreground shrink-0">Local</span>
+                  <span className="font-mono text-[10px] text-foreground/80 truncate">
+                    {status?.localUrl ?? `http://localhost:${status?.serverPort ?? 5050}`}
+                  </span>
+                </div>
+                <a
+                  href={status?.localUrl ?? `http://localhost:${status?.serverPort ?? 5050}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="shrink-0"
+                >
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-5 text-[9px] px-1.5 border-border/30 hover:border-primary/50 hover:bg-primary/10"
+                  >
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </Button>
+                </a>
+              </div>
+
+              {/* Network URL */}
+              {status?.networkUrl && (
+                <div className="flex items-center justify-between gap-1 min-w-0">
+                  <div className="flex items-center gap-1 min-w-0">
+                    <span className="text-[9px] text-muted-foreground shrink-0">LAN</span>
+                    <span className="font-mono text-[10px] text-primary truncate">
+                      {status.networkUrl}
+                    </span>
+                  </div>
+                  <a
+                    href={status.networkUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0"
+                  >
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-5 text-[9px] px-1.5 border-primary/30 hover:border-primary/60 hover:bg-primary/10"
+                    >
+                      <ExternalLink className="w-2.5 h-2.5" />
+                    </Button>
+                  </a>
+                </div>
+              )}
             </div>
           </div>
 
@@ -504,7 +575,445 @@ function StatusPanel({ status, onRefresh }: { status: DevStatus | null; onRefres
             </div>
           )}
         </div>
+        <PromoteRollbackPanel status={status} />
       </ScrollArea>
+    </div>
+  );
+}
+
+// ── Promote & Rollback Panel ────────────────────────────────────────────────
+interface ReleaseManifest {
+  id: string;
+  label: string;
+  timestamp: string;
+  devNumber: number | null;
+  type: string;
+}
+
+/** Poll until the server is back up, then reload the page. */
+function useRestartPoller() {
+  const [restarting, setRestarting] = useState(false);
+  const [secondsElapsed, setSecondsElapsed] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startPolling = useCallback(() => {
+    setRestarting(true);
+    setSecondsElapsed(0);
+
+    // Tick counter for display
+    elapsedRef.current = setInterval(() => setSecondsElapsed(s => s + 1), 1000);
+
+    // Wait 3 s for the process to actually exit before we start polling
+    const start = () => {
+      timerRef.current = setInterval(async () => {
+        try {
+          // Any fast endpoint works — /api/self-dev/status is tiny
+          const r = await fetch("/api/self-dev/status", { credentials: "include" });
+          if (r.ok || r.status === 401) {
+            // Server is back — clear timers and reload
+            clearInterval(timerRef.current!);
+            clearInterval(elapsedRef.current!);
+            window.location.reload();
+          }
+        } catch {
+          /* still down — keep polling */
+        }
+      }, 2000);
+    };
+    setTimeout(start, 3000);
+  }, []);
+
+  // Clean up on unmount
+  useEffect(() => () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (elapsedRef.current) clearInterval(elapsedRef.current);
+  }, []);
+
+  return { restarting, secondsElapsed, startPolling };
+}
+
+function PromoteRollbackPanel({ status }: { status: DevStatus | null }) {
+  const { toast } = useToast();
+  const [showPromoteModal, setShowPromoteModal] = useState(false);
+  const [showRollbackModal, setShowRollbackModal] = useState(false);
+  const [includeData, setIncludeData] = useState(false);
+  const [promoteLog, setPromoteLog] = useState<Array<{ type: string; message: string }>>([]);
+  const [promoting, setPromoting] = useState(false);
+  const [promoted, setPromoted] = useState(false);
+  const [rollbackTarget, setRollbackTarget] = useState<ReleaseManifest | null>(null);
+  const [rollbackLog, setRollbackLog] = useState<Array<{ type: string; message: string }>>([]);
+  const [rollingBack, setRollingBack] = useState(false);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const { restarting, secondsElapsed, startPolling } = useRestartPoller();
+
+  const { data: releases = [], refetch: refetchReleases } = useQuery<ReleaseManifest[]>({
+    queryKey: ["/api/self-dev/releases"],
+    refetchInterval: showRollbackModal ? 5000 : false,
+  });
+
+  // Auto-scroll log
+  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [promoteLog, rollbackLog]);
+
+  const handlePromote = async () => {
+    if (!status?.devNumber) return;
+    setPromoting(true);
+    setPromoteLog([]);
+    setPromoted(false);
+
+    try {
+      const res = await fetch("/api/self-dev/promote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ devNumber: status.devNumber, includeData, includeSettings: includeData }),
+        credentials: "include",
+      });
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response stream");
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            setPromoteLog(prev => [...prev, event]);
+            if (event.type === "success") {
+              setPromoted(true);
+              startPolling(); // wait for server to come back, then auto-reload
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } catch (err: any) {
+      setPromoteLog(prev => [...prev, { type: "error", message: err.message }]);
+    } finally {
+      setPromoting(false);
+      refetchReleases();
+    }
+  };
+
+  const handleRollback = async () => {
+    if (!rollbackTarget) return;
+    setRollingBack(true);
+    setRollbackLog([]);
+
+    try {
+      const res = await fetch("/api/self-dev/rollback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ releaseId: rollbackTarget.id }),
+        credentials: "include",
+      });
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response stream");
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            setRollbackLog(prev => [...prev, event]);
+            if (event.type === "success") {
+              startPolling(); // wait for server to come back, then auto-reload
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } catch (err: any) {
+      setRollbackLog(prev => [...prev, { type: "error", message: err.message }]);
+    } finally {
+      setRollingBack(false);
+      refetchReleases();
+    }
+  };
+
+  const handleDeleteRelease = async (id: string) => {
+    try {
+      await apiRequest("DELETE", `/api/self-dev/releases/${id}`);
+      refetchReleases();
+      toast({ title: "Snapshot deleted" });
+    } catch (err: any) {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    }
+  };
+
+  const canPromote = !!status?.devNumber;
+
+  return (
+    <div className="px-3 pb-4 space-y-2 border-t border-border/40 pt-3 mt-2">
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Custom Version</p>
+
+      {/* Deploy button */}
+      <Button
+        className="w-full h-8 text-xs font-semibold bg-primary/90 hover:bg-primary text-primary-foreground"
+        disabled={!canPromote}
+        onClick={() => { setShowPromoteModal(true); setPromoteLog([]); setPromoted(false); }}
+      >
+        <Rocket className="w-3.5 h-3.5 mr-2" />
+        Deploy to Production
+      </Button>
+
+      {/* Rollback button */}
+      <Button
+        variant="outline"
+        className="w-full h-7 text-[11px] border-border/40 hover:border-yellow-500/60 hover:bg-yellow-500/10 hover:text-yellow-400"
+        onClick={() => { setShowRollbackModal(true); setRollbackLog([]); setRollbackTarget(null); }}
+      >
+        <History className="w-3 h-3 mr-1.5" />
+        Version History &amp; Rollback
+      </Button>
+
+      {!canPromote && (
+        <p className="text-[9px] text-muted-foreground text-center">
+          Initialize a dev session to enable deployment.
+        </p>
+      )}
+
+      {/* ── PROMOTE MODAL ───────────────────────────────── */}
+      <Dialog open={showPromoteModal} onOpenChange={open => { if (!promoting) setShowPromoteModal(open); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Rocket className="w-4 h-4 text-primary" />
+              Deploy dev-{String(status?.devNumber ?? 0).padStart(3, "0")} to Production
+            </DialogTitle>
+            <DialogDescription>
+              This will replace the running Agent2077 with your custom version, rebuild it, and restart.
+              Your current version is automatically snapshotted first so you can roll back instantly.
+            </DialogDescription>
+          </DialogHeader>
+
+          {!promoting && !promoted && (
+            <div className="space-y-4">
+              {/* Data options */}
+              <div className="rounded-md border border-border/40 bg-muted/20 p-3 space-y-3">
+                <p className="text-xs font-semibold text-foreground">Data &amp; Settings</p>
+
+                <div className="flex items-start gap-3">
+                  <Checkbox
+                    id="include-data"
+                    checked={includeData}
+                    onCheckedChange={v => setIncludeData(!!v)}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <Label htmlFor="include-data" className="text-xs cursor-pointer">
+                      Copy chats &amp; settings from dev session
+                    </Label>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      Replaces production data with what you have in the dev session.
+                      Leave unchecked to keep your existing chats and settings.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Warning */}
+              <div className="flex gap-2 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-3">
+                <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-yellow-300/90">
+                  Agent2077 will be unavailable for 1–3 minutes while the build runs and it restarts.
+                  A rollback snapshot is created automatically before any changes are made.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Progress log */}
+          {(promoting || promoteLog.length > 0) && (
+            <div className="rounded-md border border-border/30 bg-black/40 p-3 max-h-52 overflow-y-auto space-y-1">
+              {promoteLog.map((entry, i) => (
+                <div key={i} className={`flex items-start gap-2 text-[11px] font-mono ${
+                  entry.type === "error" ? "text-red-400" :
+                  entry.type === "success" ? "text-green-400" :
+                  "text-muted-foreground"
+                }`}>
+                  {entry.type === "error" && <XCircle className="w-3 h-3 shrink-0 mt-0.5" />}
+                  {entry.type === "success" && <CheckCircle className="w-3 h-3 shrink-0 mt-0.5 text-green-400" />}
+                  {entry.type === "progress" && <span className="w-3 shrink-0">›</span>}
+                  <span className="whitespace-pre-wrap">{entry.message}</span>
+                </div>
+              ))}
+              {promoting && (
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Working...
+                </div>
+              )}
+              {restarting && (
+                <div className="flex items-center gap-2 text-[11px] text-cyan-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Waiting for Agent2077 to come back online… ({secondsElapsed}s)
+                </div>
+              )}
+              <div ref={logEndRef} />
+            </div>
+          )}
+
+          <DialogFooter>
+            {!promoting && !promoted && (
+              <>
+                <Button variant="outline" onClick={() => setShowPromoteModal(false)}>Cancel</Button>
+                <Button
+                  className="bg-primary hover:bg-primary/90"
+                  onClick={handlePromote}
+                >
+                  <Rocket className="w-3.5 h-3.5 mr-2" /> Deploy Now
+                </Button>
+              </>
+            )}
+            {promoting && (
+              <Button variant="outline" disabled>
+                <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Deploying...
+              </Button>
+            )}
+            {promoted && restarting && (
+              <Button variant="outline" disabled>
+                <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                Restarting… {secondsElapsed}s
+              </Button>
+            )}
+            {promoted && !restarting && (
+              <Button onClick={() => setShowPromoteModal(false)}>
+                <CheckCircle className="w-3.5 h-3.5 mr-2" /> Done — Close
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── ROLLBACK MODAL ─────────────────────────────── */}
+      <Dialog open={showRollbackModal} onOpenChange={open => { if (!rollingBack) setShowRollbackModal(open); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <History className="w-4 h-4 text-yellow-400" />
+              Version History &amp; Rollback
+            </DialogTitle>
+            <DialogDescription>
+              Select a snapshot to restore. Your current version is always snapshotted before any rollback.
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Release list */}
+          {!rollingBack && rollbackLog.length === 0 && (
+            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+              {releases.length === 0 && (
+                <p className="text-xs text-muted-foreground text-center py-4">
+                  No snapshots yet. Deploy a custom version to create one automatically.
+                </p>
+              )}
+              {releases.map(rel => (
+                <div
+                  key={rel.id}
+                  className={`rounded-md border p-2.5 cursor-pointer transition-colors ${
+                    rollbackTarget?.id === rel.id
+                      ? "border-primary/60 bg-primary/10"
+                      : "border-border/40 hover:border-border/70 hover:bg-muted/20"
+                  }`}
+                  onClick={() => setRollbackTarget(rel)}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-mono font-medium text-foreground truncate">{rel.label}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {new Date(rel.timestamp).toLocaleString()}
+                        {rel.devNumber != null && (
+                          <span className="ml-2 text-primary/70">dev-{String(rel.devNumber).padStart(3, "0")}</span>
+                        )}
+                      </p>
+                    </div>
+                    <button
+                      className="shrink-0 p-1 rounded hover:bg-red-500/20 hover:text-red-400 text-muted-foreground transition-colors"
+                      onClick={e => { e.stopPropagation(); handleDeleteRelease(rel.id); }}
+                      title="Delete snapshot"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Rollback log */}
+          {rollbackLog.length > 0 && (
+            <div className="rounded-md border border-border/30 bg-black/40 p-3 max-h-52 overflow-y-auto space-y-1">
+              {rollbackLog.map((entry, i) => (
+                <div key={i} className={`flex items-start gap-2 text-[11px] font-mono ${
+                  entry.type === "error" ? "text-red-400" :
+                  entry.type === "success" ? "text-green-400" :
+                  "text-muted-foreground"
+                }`}>
+                  {entry.type === "error" && <XCircle className="w-3 h-3 shrink-0 mt-0.5" />}
+                  {entry.type === "success" && <CheckCircle className="w-3 h-3 shrink-0 mt-0.5" />}
+                  {entry.type === "progress" && <span className="w-3 shrink-0">›</span>}
+                  <span className="whitespace-pre-wrap">{entry.message}</span>
+                </div>
+              ))}
+              {rollingBack && (
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Rolling back...
+                </div>
+              )}
+              {restarting && (
+                <div className="flex items-center gap-2 text-[11px] text-cyan-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Waiting for Agent2077 to come back online… ({secondsElapsed}s)
+                </div>
+              )}
+              <div ref={logEndRef} />
+            </div>
+          )}
+
+          <DialogFooter>
+            {!rollingBack && rollbackLog.length === 0 && (
+              <>
+                <Button variant="outline" onClick={() => setShowRollbackModal(false)}>Cancel</Button>
+                <Button
+                  variant="outline"
+                  className="border-yellow-500/40 hover:border-yellow-500 hover:bg-yellow-500/10 text-yellow-400"
+                  disabled={!rollbackTarget}
+                  onClick={handleRollback}
+                >
+                  <RotateCcw className="w-3.5 h-3.5 mr-2" />
+                  Restore Selected
+                </Button>
+              </>
+            )}
+            {rollingBack && (
+              <Button variant="outline" disabled>
+                <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Restoring...
+              </Button>
+            )}
+            {!rollingBack && rollbackLog.length > 0 && restarting && (
+              <Button variant="outline" disabled>
+                <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                Restarting… {secondsElapsed}s
+              </Button>
+            )}
+            {!rollingBack && rollbackLog.length > 0 && !restarting && (
+              <Button onClick={() => setShowRollbackModal(false)}>Close</Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -180,6 +180,16 @@ sudo cp "$INSTALL_DIR/docker/nginx.conf" /etc/nginx/sites-available/agent2077
 sudo ln -sf /etc/nginx/sites-available/agent2077 /etc/nginx/sites-enabled/agent2077
 sudo rm -f /etc/nginx/sites-enabled/default
 
+# Allow Agent2077 (runs as current user) to write per-app nginx configs
+# without needing sudo each time. The conf.d dir is group-owned by www-data;
+# we add the current user to that group instead of making conf.d world-writable.
+AGENT_USER=$(whoami)
+sudo chgrp www-data /etc/nginx/conf.d
+sudo chmod g+w /etc/nginx/conf.d
+sudo usermod -aG www-data "$AGENT_USER"
+echo "  ✓ /etc/nginx/conf.d writable by $AGENT_USER (group: www-data)"
+echo "    NOTE: You may need to log out and back in (or run 'newgrp www-data') for group to take effect."
+
 sudo nginx -t && sudo systemctl restart nginx
 sudo systemctl enable nginx
 echo "  ✓ nginx configured and running"

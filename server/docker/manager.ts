@@ -258,9 +258,14 @@ class DockerManager {
   }
 
   /**
-   * Build and deploy a persistent app container
+   * Build and deploy a persistent app container.
+   *
+   * @param bindHost - The host IP to bind the port on. Defaults to "0.0.0.0"
+   *   (all interfaces) so the app is reachable from the local network via
+   *   agent2077.local:<port>, not just from localhost. Pass "127.0.0.1" to
+   *   restrict to loopback-only if needed.
    */
-  async deployApp(appId: number, dockerfile: string, buildContext: string, port: number, internalPort: number): Promise<{ containerId: string; port: number }> {
+  async deployApp(appId: number, dockerfile: string, buildContext: string, port: number, internalPort: number, bindHost: string = "0.0.0.0"): Promise<{ containerId: string; port: number }> {
     if (!this.ready) throw new Error("Docker is not available");
 
     const app = appStore.getById(appId);
@@ -347,7 +352,9 @@ class DockerManager {
         ExposedPorts: { [`${internalPort}/tcp`]: {} },
         HostConfig: {
           PortBindings: {
-            [`${internalPort}/tcp`]: [{ HostPort: String(port) }],
+            // Bind to bindHost (default 0.0.0.0 = all interfaces) so the app
+            // is reachable from the LAN via agent2077.local:<port>.
+            [`${internalPort}/tcp`]: [{ HostIp: bindHost, HostPort: String(port) }],
           },
           RestartPolicy: { Name: "unless-stopped" },
         },
