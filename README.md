@@ -57,10 +57,10 @@ Agent2077 is meant to be run on its own linux machine and server on the local ne
 
 ```bash
 in the main folder where the install.sh is, open a terminal and run ./install.sh
-If you have already installed Agent2077 you can launch it by opening the terminal and running ./start.sh
-
-add the "--listen flag" to have it start serving on the local network. (When serving on the local network it is your job to make sure it is safe and secure, I do not recomend doing this on public wifi, only on your own private wifi or lan.)
+After install you can launch it again by opening the terminal and running ./start.sh
 ```
+(When serving on the local network it is your job to make sure it is safe and secure, I do not recomend doing this on public wifi, only on your own private wifi or lan.)
+
 
 Open:
 
