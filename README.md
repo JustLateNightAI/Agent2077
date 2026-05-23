@@ -145,16 +145,6 @@ data/                   local SQLite database, memory files
 docs/screenshots/       README screenshots
 ```
 
-## Useful scripts
-
-```bash
-npm run dev       # development server
-npm run build     # production client + server bundle
-npm start         # run built server
-npm run db:studio # open Drizzle Studio
-```
-
-Additional smoke tests live in `script/`, including tool selector, tool discovery, router, repair, and failure-classifier checks.
 
 ## Security notes
 
