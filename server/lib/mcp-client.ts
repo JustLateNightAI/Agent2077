@@ -60,6 +60,58 @@ export function mcpToolName(serverName: string, toolName: string): string {
   return `mcp_${clean(serverName)}_${clean(toolName)}`;
 }
 
+/** Placeholder shown to the UI instead of real secret values. */
+export const MCP_SECRET_MASK = "********";
+
+/**
+ * Return a copy of an MCP server record with env var *values* masked (keys
+ * preserved) so the UI can show which vars are set without leaking secrets.
+ */
+export function redactMcpEnvVars<T extends { envVars?: string | null }>(server: T): T {
+  if (!server?.envVars) return server;
+  try {
+    const parsed = JSON.parse(server.envVars);
+    const masked: Record<string, string> = {};
+    for (const k of Object.keys(parsed)) masked[k] = MCP_SECRET_MASK;
+    return { ...server, envVars: JSON.stringify(masked) };
+  } catch {
+    return { ...server, envVars: MCP_SECRET_MASK };
+  }
+}
+
+/**
+ * Merge an incoming (possibly partially-masked) envVars payload from the UI
+ * with the currently-stored envVars, so that:
+ *   - keys whose value is the mask placeholder keep their stored secret
+ *   - keys with a real new value are updated
+ *   - keys absent from the incoming payload are dropped (user removed them)
+ *
+ * Returns the JSON string to persist, or `undefined` when there's nothing to
+ * change (caller should leave the stored value untouched).
+ */
+export function mergeMaskedEnvVars(incoming: string | undefined, storedJson: string | null | undefined): string | undefined {
+  if (typeof incoming !== "string") return undefined;
+  let incomingObj: Record<string, unknown>;
+  try { incomingObj = JSON.parse(incoming); } catch { return incoming; } // unparseable → store as-is
+  if (incomingObj === null || typeof incomingObj !== "object") return incoming;
+
+  let stored: Record<string, unknown> = {};
+  if (storedJson) { try { stored = JSON.parse(storedJson); } catch { /* ignore */ } }
+
+  const values = Object.values(incomingObj);
+  // Fully-masked payload with no new keys → user changed nothing; skip update.
+  if (values.length > 0 && values.every(v => v === MCP_SECRET_MASK) &&
+      Object.keys(incomingObj).every(k => k in stored)) {
+    return undefined;
+  }
+
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(incomingObj)) {
+    result[k] = v === MCP_SECRET_MASK && k in stored ? stored[k] : v;
+  }
+  return JSON.stringify(result);
+}
+
 /**
  * Connect to an MCP server by ID and register its tools.
  */
@@ -124,17 +176,35 @@ async function connectViaStdio(server: any): Promise<void> {
       console.warn(`[MCP:${server.name}] stderr: ${data.toString().slice(0, 200)}`);
     });
 
+    const rejectAllPending = (reason: string) => {
+      for (const [, p] of conn.pendingRequests) p.reject(new Error(reason));
+      conn.pendingRequests.clear();
+    };
+
     proc.on("error", (err) => {
-      console.error(`[MCP:${server.name}] Process error:`, err.message);
-      mcpServerStore.update(server.id, { status: "error", lastError: err.message });
+      // Most common: ENOENT when `command` isn't on PATH (e.g. npx missing).
+      const msg = (err as any)?.code === "ENOENT"
+        ? `Command not found: "${program}". Is it installed and on PATH?`
+        : err.message;
+      console.error(`[MCP:${server.name}] Process error:`, msg);
+      mcpServerStore.update(server.id, { status: "error", lastError: msg });
+      rejectAllPending(msg);
       activeConnections.delete(server.id);
-      reject(err);
+      reject(new Error(msg));
     });
 
     proc.on("close", (code) => {
       console.log(`[MCP:${server.name}] Process closed with code ${code}`);
+      rejectAllPending(`MCP process exited (code ${code})`);
       if (activeConnections.has(server.id)) {
-        mcpServerStore.update(server.id, { status: "disconnected" });
+        // Unexpected exit while we thought we were connected — surface it.
+        const wasConnected = mcpServerStore.getById(server.id)?.status === "connected";
+        mcpServerStore.update(server.id, {
+          status: code === 0 ? "disconnected" : "error",
+          ...(code !== 0 && wasConnected ? { lastError: `Process exited unexpectedly (code ${code})` } : {}),
+          toolCount: 0,
+        });
+        for (const name of conn.registeredToolNames) unregisterTool(name);
         activeConnections.delete(server.id);
       }
     });
@@ -157,16 +227,24 @@ async function connectViaStdio(server: any): Promise<void> {
       }
     });
 
-    // Give the process a moment to start, then initialize
+    // Give the process a brief moment to spawn, then run the handshake. The
+    // handshake awaits real JSON-RPC responses, so this delay only needs to
+    // cover process startup — not the server becoming ready.
+    const startupDelay = Number(process.env.MCP_STARTUP_DELAY_MS) || 150;
     setTimeout(async () => {
+      // If the process already died (spawn error/close fired), bail — the
+      // handlers above have already rejected and cleaned up.
+      if (!activeConnections.has(server.id)) return;
       try {
         await initializeAndRegister(conn, server);
         resolve();
       } catch (err: any) {
         mcpServerStore.update(server.id, { status: "error", lastError: err.message });
+        try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+        activeConnections.delete(server.id);
         reject(err);
       }
-    }, 500);
+    }, startupDelay);
   });
 }
 
@@ -211,29 +289,57 @@ function handleResponse(conn: McpConnection, msg: JsonRpcResponse) {
   }
 }
 
+/** Per-request timeout for JSON-RPC calls (ms). */
+const REQUEST_TIMEOUT_MS = 30000;
+
+/**
+ * Send a JSON-RPC *notification* (no id, no response expected). The MCP spec
+ * requires the client to send `notifications/initialized` after the
+ * `initialize` response and before any further requests — spec-compliant
+ * servers (e.g. GitHub MCP) will not answer `tools/list` until they get it.
+ */
+function sendNotification(conn: McpConnection, method: string, params?: any): void {
+  const payload = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
+  if (conn.transport === "stdio" && conn.process?.stdin?.writable) {
+    try { conn.process.stdin.write(payload); } catch { /* process gone */ }
+  } else if (conn.transport === "sse") {
+    const server = mcpServerStore.getById(conn.serverId);
+    if (server?.sseUrl) {
+      fetch(server.sseUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", method, params }),
+      }).catch(() => { /* notifications are fire-and-forget */ });
+    }
+  }
+}
+
 function sendRequest(conn: McpConnection, method: string, params?: any): Promise<any> {
   const id = conn.nextId++;
   const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
   const json = JSON.stringify(request) + "\n";
 
   return new Promise((resolve, reject) => {
-    conn.pendingRequests.set(id, { resolve, reject });
-
-    // Timeout after 30s
+    // Timeout — also covers a server that goes silent.
     const timer = setTimeout(() => {
       if (conn.pendingRequests.has(id)) {
         conn.pendingRequests.delete(id);
-        reject(new Error(`MCP request timed out: ${method}`));
+        reject(new Error(`MCP request timed out after ${REQUEST_TIMEOUT_MS / 1000}s: ${method}`));
       }
-    }, 30000);
+    }, REQUEST_TIMEOUT_MS);
 
     const wrappedResolve = (v: any) => { clearTimeout(timer); resolve(v); };
     const wrappedReject = (e: any) => { clearTimeout(timer); reject(e); };
     conn.pendingRequests.set(id, { resolve: wrappedResolve, reject: wrappedReject });
 
-    if (conn.transport === "stdio" && conn.process) {
+    if (conn.transport === "stdio") {
+      if (!conn.process?.stdin?.writable) {
+        conn.pendingRequests.delete(id);
+        clearTimeout(timer);
+        return reject(new Error("MCP process stdin is not writable (process not running)"));
+      }
       try {
-        conn.process.stdin?.write(json);
+        conn.process.stdin.write(json);
       } catch (err: any) {
         conn.pendingRequests.delete(id);
         clearTimeout(timer);
@@ -273,6 +379,11 @@ async function initializeAndRegister(conn: McpConnection, server: any): Promise<
     capabilities: { tools: {} },
     clientInfo: { name: "agent2077", version: "1.0.0" },
   });
+
+  // Step 1b: MUST send the `initialized` notification before any other request.
+  // Spec-compliant servers (GitHub MCP, the official SDK servers) hold all
+  // requests until they receive this — omitting it makes tools/list hang.
+  sendNotification(conn, "notifications/initialized", {});
 
   // Step 2: list tools
   const toolsResult = await sendRequest(conn, "tools/list", {});

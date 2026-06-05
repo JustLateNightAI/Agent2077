@@ -272,6 +272,13 @@ export function selectTools(input: ToolSelectionInput): ToolSelectionResult {
     for (const name of input.route.forceInclude || []) {
       addIfRegistered(name, "route:force", input.allTools, selected, reasons, input.blockedTools);
     }
+    // Keep connected MCP tools available even on the pure-chat route — the user
+    // may say "create a GitHub issue" which the router can read as a chat turn.
+    for (const [name, h] of input.allTools) {
+      if (!name.startsWith("mcp_")) continue;
+      if (h.checkFn && !h.checkFn()) continue;
+      addIfRegistered(name, "mcp-connected", input.allTools, selected, reasons, input.blockedTools);
+    }
     notes.push(`route=respond (conf=${input.route.confidence.toFixed(2)}) — minimal floor only`);
 
     const defs: ToolDefinition[] = [];
@@ -378,6 +385,20 @@ export function selectTools(input: ToolSelectionInput): ToolSelectionResult {
     addIfRegistered("memory_store", "memory-pair", input.allTools, selected, reasons, input.blockedTools);
   }
 
+  // ── 7b. MCP tools (always included) ───────────────────────────────────────
+  // Tools whose name starts with `mcp_` come from MCP servers the user has
+  // explicitly connected in Settings. Connecting a server IS the intent signal,
+  // so we never want the keyword/bundle heuristics to hide them. They are also
+  // exempt from the cap below (added after cap-trim) — a user who wired up
+  // GitHub MCP expects those tools to be callable, full stop.
+  const mcpToolNames: string[] = [];
+  for (const [name, h] of input.allTools) {
+    if (!name.startsWith("mcp_")) continue;
+    if (input.blockedTools?.has(name)) continue;
+    if (h.checkFn && !h.checkFn()) continue;
+    mcpToolNames.push(name);
+  }
+
   // ── 8. Cap enforcement ────────────────────────────────────────────────────
   // If somehow we're over the cap (plan contributed a lot), trim from the
   // lowest-priority end. We keep insertion order; later additions get dropped.
@@ -388,6 +409,17 @@ export function selectTools(input: ToolSelectionInput): ToolSelectionResult {
     keep.forEach(n => selected.add(n));
     notes.push(`trimmed to cap=${cap}`);
   }
+
+  // Add MCP tools AFTER the cap trim so connected servers' tools are never
+  // dropped. (Project mode forbids local file/shell tools but MCP tools are a
+  // deliberate user-configured surface, so they're allowed there too.)
+  for (const name of mcpToolNames) {
+    if (!selected.has(name)) {
+      selected.add(name);
+      reasons.set(name, "mcp-connected");
+    }
+  }
+  if (mcpToolNames.length > 0) notes.push(`mcp tools included: ${mcpToolNames.length}`);
 
   // ── 9. Safety: never return zero tools when tools exist ──────────────────
   if (selected.size === 0) {

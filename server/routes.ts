@@ -14,7 +14,7 @@ import {
   mcpServerStore, backgroundTaskStore, generatedImageStore, workflowStore,
   getProjectsRoot,
 } from "./storage.js";
-import { connectMcpServer, disconnectMcpServer, getMcpServerTools } from "./lib/mcp-client.js";
+import { connectMcpServer, disconnectMcpServer, getMcpServerTools, redactMcpEnvVars, mergeMaskedEnvVars } from "./lib/mcp-client.js";
 import { insertMcpServerSchema, resolveReasoningProfile, reasoningProfilesSchema } from "../shared/schema.js";
 import { enqueueTask, cancelTask, retryTask } from "./lib/background-tasks.js";
 import { cancelChildRequests } from "./lib/sub-agent-executor.js";
@@ -1859,17 +1859,7 @@ CMD ["node", "index.js"]`;
   // Env vars often hold secrets (e.g. GITHUB_PERSONAL_ACCESS_TOKEN). Redact
   // their values before returning a server to the client; keys are kept so
   // the UI can show which vars are set without leaking the secret itself.
-  function redactMcpServer<T extends { envVars?: string | null }>(server: T): T {
-    if (!server?.envVars) return server;
-    try {
-      const parsed = JSON.parse(server.envVars);
-      const masked: Record<string, string> = {};
-      for (const k of Object.keys(parsed)) masked[k] = "********";
-      return { ...server, envVars: JSON.stringify(masked) };
-    } catch {
-      return { ...server, envVars: "********" };
-    }
-  }
+  const redactMcpServer = redactMcpEnvVars;
 
   app.get("/api/mcp-servers", (req, res) => {
     try {
@@ -1904,16 +1894,17 @@ CMD ["node", "index.js"]`;
       if (!parsed.success) {
         return res.status(400).json({ error: parsed.error.errors.map(e => `${e.path.join(".")}: ${e.message}`).join("; ") });
       }
-      // A redacted envVars payload (all values "********") means the user did not
-      // change secrets — drop it so we don't overwrite stored values with masks.
+      const id = parseInt(req.params.id);
       const data: Record<string, any> = { ...parsed.data };
+      // Merge masked env values with stored secrets: keep unchanged secrets,
+      // apply real new values, drop removed keys. `undefined` => leave as-is.
       if (typeof data.envVars === "string") {
-        try {
-          const vals = Object.values(JSON.parse(data.envVars));
-          if (vals.length > 0 && vals.every(v => v === "********")) delete data.envVars;
-        } catch { /* keep as-is if unparseable */ }
+        const existing = mcpServerStore.getById(id);
+        const merged = mergeMaskedEnvVars(data.envVars, existing?.envVars);
+        if (merged === undefined) delete data.envVars;
+        else data.envVars = merged;
       }
-      const updated = mcpServerStore.update(parseInt(req.params.id), data);
+      const updated = mcpServerStore.update(id, data);
       if (!updated) return res.status(404).json({ error: "Not found" });
       res.json(redactMcpServer(updated));
     } catch (err: any) {

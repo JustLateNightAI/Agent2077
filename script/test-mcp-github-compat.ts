@@ -33,8 +33,12 @@ const {
   getMcpServerTools,
   getMcpConnectionStatus,
   mcpToolName,
+  redactMcpEnvVars,
+  mergeMaskedEnvVars,
+  MCP_SECRET_MASK,
 } = await import("../server/lib/mcp-client.js");
 const { getTool, getAllTools } = await import("../server/tools/registry.js");
+const { selectTools } = await import("../server/lib/tool-selector.js");
 
 let failures = 0;
 function check(label: string, ok: boolean, detail?: string) {
@@ -101,14 +105,14 @@ try {
   check("connection reports connected", getMcpConnectionStatus(mock.id) === "connected");
 
   const tools = getMcpServerTools(mock.id);
-  check("tools/list discovered 2 tools", tools.length === 2, `${tools.map(t => t.name).join(", ")}`);
+  check("tools/list discovered 3 tools", tools.length === 3, `${tools.map(t => t.name).join(", ")}`);
 
   const echoName = mcpToolName("MockServer", "echo");
   const registered = getTool(echoName);
   check("echo tool registered under sanitized name", !!registered, echoName);
 
   const dbAfterConnect = mcpServerStore.getById(mock.id)!;
-  check("status persisted as connected with toolCount", dbAfterConnect.status === "connected" && dbAfterConnect.toolCount === 2);
+  check("status persisted as connected with toolCount", dbAfterConnect.status === "connected" && dbAfterConnect.toolCount === 3);
 
   // Execute the echo tool through the registry handler.
   if (registered) {
@@ -133,6 +137,94 @@ try {
   const dbAfterDisconnect = mcpServerStore.getById(mock.id)!;
   check("status persisted as disconnected with toolCount 0",
     dbAfterDisconnect.status === "disconnected" && dbAfterDisconnect.toolCount === 0);
+
+  // ── tool-name sanitization edge cases ───────────────────────────────
+  check("mcpToolName lowercases + collapses unsafe runs",
+    mcpToolName("  Weird   Name  ", "Tool@@Name") === "mcp_weird_name_toolname" ||
+    /^mcp_weird_name_tool_+name$/.test(mcpToolName("  Weird   Name  ", "Tool@@Name")),
+    mcpToolName("  Weird   Name  ", "Tool@@Name"));
+  check("mcpToolName output is always LLM-safe ([a-z0-9_-])",
+    /^[a-z0-9_-]+$/.test(mcpToolName("Über/Server", "do—it.now!")),
+    mcpToolName("Über/Server", "do—it.now!"));
+
+  // ── env redaction (response masking) ────────────────────────────────
+  const redacted = redactMcpEnvVars({ envVars: JSON.stringify({ GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_realtoken", FOO: "bar" }) });
+  const redObj = JSON.parse(redacted.envVars!);
+  check("redaction masks all secret values but keeps keys",
+    redObj.GITHUB_PERSONAL_ACCESS_TOKEN === MCP_SECRET_MASK && redObj.FOO === MCP_SECRET_MASK &&
+    Object.keys(redObj).length === 2);
+
+  // ── partial masked env update (preserve unchanged secrets) ──────────
+  const stored = JSON.stringify({ GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_realtoken", OTHER: "keepme" });
+  // User edits only OTHER, leaves the token masked.
+  const merged1 = mergeMaskedEnvVars(JSON.stringify({ GITHUB_PERSONAL_ACCESS_TOKEN: MCP_SECRET_MASK, OTHER: "changed" }), stored);
+  const m1 = JSON.parse(merged1!);
+  check("partial update keeps masked secret, applies real change",
+    m1.GITHUB_PERSONAL_ACCESS_TOKEN === "ghp_realtoken" && m1.OTHER === "changed", merged1);
+  // Fully masked, no new keys → no update.
+  const merged2 = mergeMaskedEnvVars(JSON.stringify({ GITHUB_PERSONAL_ACCESS_TOKEN: MCP_SECRET_MASK, OTHER: MCP_SECRET_MASK }), stored);
+  check("fully-masked unchanged payload yields no DB write", merged2 === undefined, String(merged2));
+  // New key with real value alongside masked existing.
+  const merged3 = mergeMaskedEnvVars(JSON.stringify({ GITHUB_PERSONAL_ACCESS_TOKEN: MCP_SECRET_MASK, NEWKEY: "newval" }), stored);
+  const m3 = JSON.parse(merged3!);
+  check("adding a new key preserves masked existing secret",
+    m3.GITHUB_PERSONAL_ACCESS_TOKEN === "ghp_realtoken" && m3.NEWKEY === "newval" && !("OTHER" in m3), merged3);
+
+  // ── connect again to test selector + error tool + bad command ───────
+  await connectMcpServer(mock.id);
+  await sleep(100);
+  check("reconnect works (initialized handshake)", getMcpConnectionStatus(mock.id) === "connected");
+  const tools2 = getMcpServerTools(mock.id);
+  check("reconnect discovers all 3 tools (incl boom)", tools2.length === 3, tools2.map(t => t.name).join(", "));
+
+  // Error surfacing from a tools/call error response.
+  const boom = getTool(mcpToolName("MockServer", "boom"));
+  if (boom) {
+    const r = await boom.execute({}, {} as any);
+    check("MCP tool error is surfaced readably",
+      !r.success && /boom/i.test(r.output), r.output);
+  } else {
+    check("boom tool registered", false);
+  }
+
+  // Smart tool selector MUST include connected mcp_* tools even when the
+  // task bundle/keywords don't mention them.
+  const selection = selectTools({
+    allTools: getAllTools(),
+    taskType: "coding" as any,
+    model: { modelId: "gpt-4o", supportsToolCalling: true } as any,
+    modelSize: "large",
+    lastUserMessage: "refactor this function",   // no MCP/github keywords
+    smartSelectionEnabled: true,
+  });
+  const selectedMcp = [...selection.selectedNames].filter(n => n.startsWith("mcp_"));
+  check("tool selector includes connected MCP tools regardless of keywords",
+    selectedMcp.includes(mcpToolName("MockServer", "echo")), selectedMcp.join(", "));
+
+  await disconnectMcpServer(mock.id);
+  await sleep(50);
+
+  // ── bad command produces a clear error + stored lastError ───────────
+  const broken = mcpServerStore.create({
+    name: "Broken",
+    command: "definitely-not-a-real-binary-xyz",
+    args: "[]",
+    envVars: "{}",
+    transportType: "stdio",
+    isEnabled: false,
+  } as any);
+  let badErr = "";
+  try {
+    await connectMcpServer(broken.id);
+  } catch (e: any) {
+    badErr = e?.message || String(e);
+  }
+  check("bad command rejects with a clear error", /not found|ENOENT|definitely-not-a-real-binary/i.test(badErr), badErr);
+  const brokenDb = mcpServerStore.getById(broken.id)!;
+  check("bad command stores status=error + lastError",
+    brokenDb.status === "error" && !!brokenDb.lastError, `${brokenDb.status} / ${brokenDb.lastError}`);
+  check("bad command leaves no registered tools",
+    ![...getAllTools().keys()].some(k => k.startsWith("mcp_broken_")));
 
 } catch (err: any) {
   check(`unexpected error: ${err?.message || err}`, false);

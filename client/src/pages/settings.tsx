@@ -1649,20 +1649,39 @@ function McpServerSection() {
                   <Input value={form.env} onChange={e => setForm(f => ({ ...f, env: e.target.value }))}
                     placeholder='{"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}' className="text-xs font-mono" data-testid="input-mcp-env" />
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setForm(f => ({
-                    ...f,
-                    name: f.name || "GitHub",
-                    command: "npx",
-                    args: '["-y", "@modelcontextprotocol/server-github"]',
-                    env: '{"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_token_here"}',
-                  }))}
-                  className="text-[10px] text-cyan-400 hover:text-cyan-300 underline"
-                  data-testid="button-mcp-github-example"
-                >
-                  Fill GitHub MCP example
-                </button>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <button
+                    type="button"
+                    onClick={() => setForm(f => ({
+                      ...f,
+                      name: f.name || "GitHub",
+                      command: "npx",
+                      args: '["-y", "@modelcontextprotocol/server-github"]',
+                      env: '{"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_token_here"}',
+                    }))}
+                    className="text-[10px] text-cyan-400 hover:text-cyan-300 underline"
+                    data-testid="button-mcp-github-example"
+                  >
+                    Fill GitHub (npx) example
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForm(f => ({
+                      ...f,
+                      name: f.name || "GitHub",
+                      command: "docker",
+                      args: '["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"]',
+                      env: '{"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_token_here"}',
+                    }))}
+                    className="text-[10px] text-cyan-400 hover:text-cyan-300 underline"
+                    data-testid="button-mcp-github-docker-example"
+                  >
+                    Fill GitHub (Docker) example
+                  </button>
+                </div>
+                <p className="text-[10px] text-zinc-500 leading-snug">
+                  npx package is the deprecated reference server; Docker is GitHub's official one. Env secrets are masked after saving.
+                </p>
               </>
             )}
           </div>
