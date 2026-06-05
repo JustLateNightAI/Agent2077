@@ -93,6 +93,7 @@ function bootstrapSchema() {
       temperature REAL,
       top_p REAL,
       thinking_enabled INTEGER NOT NULL DEFAULT 0,
+      reasoning_profiles TEXT,
       notes TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -342,6 +343,8 @@ function runMigrations() {
     { table: "memory_entries", column: "scope", type: "TEXT NOT NULL DEFAULT 'general'" },
     // v16.63: thinking/reasoning mode toggle per model
     { table: "models", column: "thinking_enabled", type: "INTEGER NOT NULL DEFAULT 0" },
+    // v16.74.5: per-model custom reasoning/thinking profiles (JSON array)
+    { table: "models", column: "reasoning_profiles", type: "TEXT" },
   ];
 
   for (const { table, column, type } of migrations) {

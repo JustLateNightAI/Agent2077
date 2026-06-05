@@ -331,6 +331,174 @@
 :root[data-theme="lofi"] .rounded-2xl,
 :root[data-theme="lofi"].dark .rounded-2xl { border-radius: 1.5rem; }
 
+/* ═══════════════════════════════════════════════════════════
+   CLEAN PRO THEME — v16.74.3
+   Modern AI-app aesthetic (ChatGPT / Perplexity). Soft off-white
+   surfaces, gentle borders, calm teal accent, comfortable Inter
+   typography, generous rounding, zero neon glow. Designed to feel
+   high-polish, quiet and readable rather than cyberpunk.
+   Distinct from Professional (sharp Linear/SaaS) by being warmer,
+   softer and roomier.
+   ═══════════════════════════════════════════════════════════ */
+
+:root[data-theme="clean"] {
+  --background: 60 6% 97%;          /* Soft off-white #F7F7F6 */
+  --foreground: 215 25% 15%;        /* Calm near-black slate #1d2329 */
+  --card: 0 0% 100%;                /* Pure white panels */
+  --card-foreground: 215 25% 15%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 215 25% 15%;
+  --primary: 173 58% 39%;           /* Calm teal #2a9d8f — Perplexity-ish */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 60 5% 93%;           /* Light warm gray #eeeeec */
+  --secondary-foreground: 215 20% 25%;
+  --muted: 60 5% 95%;
+  --muted-foreground: 215 10% 45%;  /* Readable medium gray */
+  --accent: 173 58% 39%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 65% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 30 6% 88%;              /* Warm hairline border #e4e2df */
+  --input: 30 6% 88%;
+  --ring: 173 58% 39%;
+  --button-outline: hsl(173, 30%, 60%);
+  --radius: 0.75rem;                /* Soft, friendly rounding */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --chart-1: 173 58% 39%;
+  --chart-2: 215 60% 50%;
+  --chart-3: 32 90% 55%;
+  --chart-4: 262 52% 58%;
+  --chart-5: 142 55% 45%;
+}
+
+:root[data-theme="clean"].dark {
+  --background: 220 16% 11%;         /* Soft charcoal #171a1f */
+  --foreground: 210 16% 90%;         /* Gentle off-white #e1e5e9 */
+  --card: 220 14% 14%;               /* #1e2228 */
+  --card-foreground: 210 16% 90%;
+  --popover: 220 14% 14%;
+  --popover-foreground: 210 16% 90%;
+  --primary: 173 52% 50%;            /* Brighter teal for dark bg */
+  --primary-foreground: 220 16% 9%;
+  --secondary: 220 12% 18%;          /* #272c33 */
+  --secondary-foreground: 210 14% 82%;
+  --muted: 220 12% 17%;
+  --muted-foreground: 210 10% 58%;
+  --accent: 173 52% 50%;
+  --accent-foreground: 220 16% 9%;
+  --destructive: 0 60% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 10% 22%;             /* #313740 */
+  --input: 220 10% 22%;
+  --ring: 173 52% 50%;
+  --button-outline: hsl(173, 30%, 45%);
+  --radius: 0.75rem;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --chart-1: 173 52% 50%;
+  --chart-2: 215 60% 60%;
+  --chart-3: 32 90% 60%;
+  --chart-4: 262 52% 65%;
+  --chart-5: 142 55% 52%;
+}
+
+/* Clean Pro — comfortable, readable typography */
+:root[data-theme="clean"] body,
+:root[data-theme="clean"].dark body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  letter-spacing: -0.005em;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Soft, generous rounding on surfaces */
+:root[data-theme="clean"] .rounded-lg,
+:root[data-theme="clean"].dark .rounded-lg { border-radius: 0.75rem; }
+:root[data-theme="clean"] .rounded-md,
+:root[data-theme="clean"].dark .rounded-md { border-radius: 0.5rem; }
+:root[data-theme="clean"] .rounded-xl,
+:root[data-theme="clean"].dark .rounded-xl { border-radius: 1rem; }
+
+/* Quiet, no neon — kill all glow effects */
+:root[data-theme="clean"] .glow-cyan,
+:root[data-theme="clean"] .glow-pink,
+:root[data-theme="clean"] .border-glow,
+:root[data-theme="clean"].dark .glow-cyan,
+:root[data-theme="clean"].dark .glow-pink,
+:root[data-theme="clean"].dark .border-glow {
+  text-shadow: none;
+  box-shadow: none;
+}
+
+/* Subtle soft elevation instead of glow on cards */
+:root[data-theme="clean"] .border-glow,
+:root[data-theme="clean"].dark .border-glow {
+  box-shadow: 0 1px 2px hsl(220 20% 10% / 0.04), 0 1px 3px hsl(220 20% 10% / 0.06);
+}
+
+/* Slim, unobtrusive scrollbar */
+:root[data-theme="clean"] ::-webkit-scrollbar,
+:root[data-theme="clean"].dark ::-webkit-scrollbar { width: 6px; height: 6px; }
+:root[data-theme="clean"] ::-webkit-scrollbar-thumb,
+:root[data-theme="clean"].dark ::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.25);
+  border-radius: 4px;
+}
+
+/* Smooth but snappy transitions */
+:root[data-theme="clean"] *,
+:root[data-theme="clean"].dark * {
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CUSTOM THEME — v16.74.2
+   User-defined fonts & colours. The concrete colour/font values
+   are injected as inline CSS variables on :root by App.tsx
+   (see customThemeCssVars). The values below are only fallbacks
+   in case the inline vars haven't been applied yet. Glows are
+   disabled so arbitrary palettes don't clash with neon effects.
+   ═══════════════════════════════════════════════════════════ */
+:root[data-theme="custom"],
+:root[data-theme="custom"].dark {
+  --background: 210 16% 7%;
+  --foreground: 210 17% 92%;
+  --card: 210 14% 11%;
+  --card-foreground: 210 17% 92%;
+  --popover: 210 14% 11%;
+  --popover-foreground: 210 17% 92%;
+  --primary: 187 100% 50%;
+  --primary-foreground: 0 0% 7%;
+  --secondary: 210 14% 11%;
+  --secondary-foreground: 210 17% 92%;
+  --muted: 210 14% 11%;
+  --muted-foreground: 210 12% 60%;
+  --accent: 330 100% 65%;
+  --accent-foreground: 0 0% 7%;
+  --destructive: 0 75% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 210 14% 11%;
+  --input: 210 14% 11%;
+  --ring: 187 100% 50%;
+  --button-outline: hsl(210, 14%, 30%);
+  --radius: 0.5rem;
+}
+:root[data-theme="custom"] body,
+:root[data-theme="custom"].dark body {
+  font-family: var(--font-sans);
+}
+/* No neon glow on custom palettes */
+:root[data-theme="custom"] .glow-cyan,
+:root[data-theme="custom"] .glow-pink,
+:root[data-theme="custom"] .border-glow,
+:root[data-theme="custom"].dark .glow-cyan,
+:root[data-theme="custom"].dark .glow-pink,
+:root[data-theme="custom"].dark .border-glow {
+  text-shadow: none;
+  box-shadow: none;
+}
+
 /* Agent2077 cyberpunk glow effects */
 .glow-cyan { text-shadow: 0 0 10px hsl(190 95% 50% / 0.5), 0 0 20px hsl(190 95% 50% / 0.3); }
 .glow-pink { text-shadow: 0 0 10px hsl(330 85% 60% / 0.5), 0 0 20px hsl(330 85% 60% / 0.3); }

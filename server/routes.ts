@@ -15,6 +15,7 @@ import {
   getProjectsRoot,
 } from "./storage.js";
 import { connectMcpServer, disconnectMcpServer, getMcpServerTools } from "./lib/mcp-client.js";
+import { insertMcpServerSchema, resolveReasoningProfile, reasoningProfilesSchema } from "../shared/schema.js";
 import { enqueueTask, cancelTask, retryTask } from "./lib/background-tasks.js";
 import { cancelChildRequests } from "./lib/sub-agent-executor.js";
 import { createTerminalSession, listTerminalSessions } from "./lib/terminal-ws.js";
@@ -79,6 +80,11 @@ export function registerRoutes(server: http.Server, app: Express) {
   // ── Chat / Agent ──────────────────────────────────────────────────
   app.post("/api/chat", async (req: AuthRequest, res) => {
     const { conversationId, message, systemPrompt: bodySystemPrompt, images, attachments } = req.body;
+    // v16.74.5: per-message reasoning/thinking mode chosen via the chat lightbulb.
+    // Resolved against the routed model's configured profiles below. Label is a
+    // fallback match key for auto-routed models (see resolveReasoningProfile).
+    const reasoningModeId: string | undefined = req.body.reasoningModeId;
+    const reasoningModeLabel: string | undefined = req.body.reasoningModeLabel;
     // v16.74: Deep Research toggle. When true, the next message runs the
     // deliberate multi-source research workflow. Absent/false → normal chat.
     const deepResearch = req.body.deepResearch === true || req.body.mode === "deep_research";
@@ -388,6 +394,18 @@ export function registerRoutes(server: http.Server, app: Express) {
       // Everything goes through the agent loop — plan is injected into the system prompt
       // CRITICAL: pass `out` (StreamWriter) instead of `res` so the agent loop writes
       // to the AgentStream buffer. This means the loop survives browser disconnects.
+      // v16.74.5: resolve the reasoning profile for the routed model. Off/unknown
+      // → null (legacy/no shaping). Failure here must never crash a normal chat.
+      let reasoning = null;
+      try {
+        reasoning = resolveReasoningProfile(routing.model as any, reasoningModeId, reasoningModeLabel);
+        if (reasoning) {
+          console.log(`[Chat] Reasoning mode: ${reasoning.label} (strategy=${reasoning.strategy})`);
+        }
+      } catch (e: any) {
+        console.warn(`[Chat] Failed to resolve reasoning profile:`, e?.message);
+      }
+
       await runAgentLoop({
         conversationId: convId,
         messages: chatMessages,
@@ -399,6 +417,7 @@ export function registerRoutes(server: http.Server, app: Express) {
         systemPrompt,
         plan: plan?.needsPlan ? plan : undefined,
         deepResearch,
+        reasoning,
       });
     } catch (err: any) {
       console.error("[Chat] Error:", err);
@@ -708,6 +727,27 @@ export function registerRoutes(server: http.Server, app: Express) {
   });
 
   app.patch("/api/models/:id", (req, res) => {
+    // v16.74.5: validate reasoningProfiles JSON before it reaches the DB so
+    // malformed profiles can't break request shaping later. Stored as a JSON
+    // string in the TEXT column; accept either a string or an array from clients.
+    if ("reasoningProfiles" in req.body) {
+      const raw = req.body.reasoningProfiles;
+      if (raw == null || raw === "") {
+        req.body.reasoningProfiles = null;
+      } else {
+        let parsed: unknown;
+        try {
+          parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        } catch {
+          return res.status(400).json({ error: "reasoningProfiles is not valid JSON" });
+        }
+        const result = reasoningProfilesSchema.safeParse(parsed);
+        if (!result.success) {
+          return res.status(400).json({ error: "Invalid reasoning profiles", details: result.error.issues });
+        }
+        req.body.reasoningProfiles = JSON.stringify(result.data);
+      }
+    }
     const updated = modelStore.update(parseInt(req.params.id), req.body);
     if (!updated) return res.status(404).json({ error: "Not found" });
     res.json(updated);
@@ -1816,9 +1856,24 @@ CMD ["node", "index.js"]`;
   });
 
   // ── MCP Servers ─────────────────────────────────────────────────────
+  // Env vars often hold secrets (e.g. GITHUB_PERSONAL_ACCESS_TOKEN). Redact
+  // their values before returning a server to the client; keys are kept so
+  // the UI can show which vars are set without leaking the secret itself.
+  function redactMcpServer<T extends { envVars?: string | null }>(server: T): T {
+    if (!server?.envVars) return server;
+    try {
+      const parsed = JSON.parse(server.envVars);
+      const masked: Record<string, string> = {};
+      for (const k of Object.keys(parsed)) masked[k] = "********";
+      return { ...server, envVars: JSON.stringify(masked) };
+    } catch {
+      return { ...server, envVars: "********" };
+    }
+  }
+
   app.get("/api/mcp-servers", (req, res) => {
     try {
-      res.json(mcpServerStore.getAll());
+      res.json(mcpServerStore.getAll().map(redactMcpServer));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1826,8 +1881,12 @@ CMD ["node", "index.js"]`;
 
   app.post("/api/mcp-servers", (req, res) => {
     try {
-      const server = mcpServerStore.create(req.body);
-      res.json(server);
+      const parsed = insertMcpServerSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: parsed.error.errors.map(e => `${e.path.join(".")}: ${e.message}`).join("; ") });
+      }
+      const server = mcpServerStore.create(parsed.data);
+      res.json(redactMcpServer(server));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1836,14 +1895,27 @@ CMD ["node", "index.js"]`;
   app.get("/api/mcp-servers/:id", (req, res) => {
     const server = mcpServerStore.getById(parseInt(req.params.id));
     if (!server) return res.status(404).json({ error: "Not found" });
-    res.json(server);
+    res.json(redactMcpServer(server));
   });
 
   app.patch("/api/mcp-servers/:id", (req, res) => {
     try {
-      const updated = mcpServerStore.update(parseInt(req.params.id), req.body);
+      const parsed = insertMcpServerSchema.partial().safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: parsed.error.errors.map(e => `${e.path.join(".")}: ${e.message}`).join("; ") });
+      }
+      // A redacted envVars payload (all values "********") means the user did not
+      // change secrets — drop it so we don't overwrite stored values with masks.
+      const data: Record<string, any> = { ...parsed.data };
+      if (typeof data.envVars === "string") {
+        try {
+          const vals = Object.values(JSON.parse(data.envVars));
+          if (vals.length > 0 && vals.every(v => v === "********")) delete data.envVars;
+        } catch { /* keep as-is if unparseable */ }
+      }
+      const updated = mcpServerStore.update(parseInt(req.params.id), data);
       if (!updated) return res.status(404).json({ error: "Not found" });
-      res.json(updated);
+      res.json(redactMcpServer(updated));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1865,7 +1937,7 @@ CMD ["node", "index.js"]`;
       const id = parseInt(req.params.id);
       await connectMcpServer(id);
       const updated = mcpServerStore.getById(id);
-      res.json(updated);
+      res.json(updated ? redactMcpServer(updated) : updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -2777,6 +2849,30 @@ CMD ["node", "index.js"]`;
 
     stream.injectUserMessage(message);
     console.log(`[SelfDev] Mid-task message injected: "${message.slice(0, 80)}"`);
+    return res.json({ ok: true, message: "Message queued for injection at next iteration" });
+  });
+
+  // POST /api/conversations/:id/inject — inject a mid-run nudge into any running
+  // agent loop (main chat or workspace/project chat). The agent loop already
+  // consumes pending messages at each iteration boundary via getStream(convId),
+  // so this just queues the message on the right conversation's stream.
+  app.post("/api/conversations/:id/inject", async (req: AuthRequest, res) => {
+    const convId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(convId)) {
+      return res.status(400).json({ error: "invalid conversation id" });
+    }
+    const { message } = req.body;
+    if (!message || typeof message !== "string" || !message.trim()) {
+      return res.status(400).json({ error: "message required" });
+    }
+
+    const stream = getStream(convId);
+    if (!stream || stream.done) {
+      return res.status(404).json({ error: "No active agent loop running — send a regular message instead" });
+    }
+
+    stream.injectUserMessage(message.trim());
+    console.log(`[Chat] Mid-run nudge injected into conv ${convId}: "${message.slice(0, 80)}"`);
     return res.json({ ok: true, message: "Message queued for injection at next iteration" });
   });
 

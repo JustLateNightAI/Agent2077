@@ -25,7 +25,7 @@
 import { v4 as uuid } from "uuid";
 import fs from "fs";
 import path from "path";
-import type { Endpoint, Model, TaskType } from "../../shared/schema.js";
+import type { Endpoint, Model, TaskType, ReasoningProfile } from "../../shared/schema.js";
 import { chatCompletionStream, cancelRequest, type ChatMessage, type ToolCall, type ToolDefinition } from "./llm-client.js";
 import { cancelChildRequests } from "./sub-agent-executor.js";
 import { LoopDetector } from "./loop-detector.js";
@@ -392,6 +392,8 @@ interface AgentRequest {
   plan?: TaskPlan;
   /** v16.74: Deep Research toggle — forces the deliberate multi-source workflow. */
   deepResearch?: boolean;
+  /** v16.74.5: resolved reasoning/thinking profile for this request (null = legacy/off). */
+  reasoning?: ReasoningProfile | null;
 }
 
 /**
@@ -1057,6 +1059,7 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
         signal: loopAbortController.signal, // persistent abort — stays aborted after stop
         conversationId,
         taskType,
+        reasoning: req.reasoning ?? null,
       };
       const nativeTopP = getModelTopP(model);
       if (nativeTopP !== undefined) streamOptions.topP = nativeTopP;
@@ -1758,6 +1761,7 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
         signal: loopAbortController.signal, // persistent abort — stays aborted after stop
         conversationId,
         taskType,
+        reasoning: req.reasoning ?? null,
       };
       const promptedTopP = getModelTopP(model);
       if (promptedTopP !== undefined) streamOptions.topP = promptedTopP;

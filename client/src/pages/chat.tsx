@@ -22,8 +22,16 @@ import {
   Search, Code, Sparkles, Brain, MessageSquare, Loader2,
   GitBranch,
   Diff, X, ImagePlus, ArrowDown, FileText, Download,
-  RotateCcw, Trash2
+  RotateCcw, Trash2, Lightbulb
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ActivityRail } from "@/components/ActivityRail";
 
 interface Message {
@@ -394,6 +402,8 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const [iterationCount, setIterationCount] = useState(0);
   const [toolCallCount, setToolCallCount] = useState(0);
   const [statusLog, setStatusLog] = useState<Array<{ message: string; detail?: string; timestamp: number }>>([]);
+  const [nudgeInput, setNudgeInput] = useState("");
+  const [nudgeSent, setNudgeSent] = useState(false);
   const [currentConvId, setCurrentConvId] = useState<number | null>(
     conversationId ? parseInt(conversationId) : null
   );
@@ -417,6 +427,10 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [deepResearch, setDeepResearch] = useState(false); // Deep Research toggle (one-shot: resets after send)
+  // v16.74.5: selected reasoning/thinking mode for this chat input. Persistent
+  // until changed (unlike Deep Research). Empty = Off/default. Stores the chosen
+  // profile id; resolved server-side against the routed model.
+  const [reasoningModeId, setReasoningModeId] = useState<string>("");
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [showJumpToPresent, setShowJumpToPresent] = useState(false);
   const { toast } = useToast();
@@ -438,6 +452,35 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     },
     enabled: !!convId,
   });
+
+  // v16.74.5: enabled models — used to build the reasoning-mode lightbulb list.
+  const { data: allModels = [] } = useQuery<any[]>({
+    queryKey: ["/api/models"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/models`);
+      return res.json();
+    },
+  });
+
+  // Deduplicated reasoning modes across enabled models (by label). Auto-routing
+  // means we don't know the exact model up front, so the server matches the
+  // chosen mode by id, then label, on the routed model.
+  const reasoningModes = useMemo(() => {
+    const seen = new Map<string, { id: string; label: string }>();
+    for (const m of allModels) {
+      if (!m?.isEnabled || !m?.reasoningProfiles) continue;
+      let profiles: any[] = [];
+      try { profiles = JSON.parse(m.reasoningProfiles); } catch { continue; }
+      for (const p of profiles) {
+        if (p?.id && p?.label && !seen.has(p.label)) {
+          seen.set(p.label, { id: p.id, label: p.label });
+        }
+      }
+    }
+    return Array.from(seen.values());
+  }, [allModels]);
+
+  const activeReasoningLabel = reasoningModes.find(r => r.id === reasoningModeId)?.label;
 
   // Sync conversationId prop changes (component stays mounted across nav)
   useEffect(() => {
@@ -706,6 +749,8 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
           conversationId: convId,
           message: msg,
           deepResearch: useDeepResearch || undefined,
+          reasoningModeId: reasoningModeId || undefined,
+          reasoningModeLabel: activeReasoningLabel || undefined,
           images: imageData.length > 0 ? imageData : undefined,
           attachments: attachedFiles.length > 0 ? attachedFiles : undefined,
         }),
@@ -804,6 +849,15 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
                 setStatusLog(prev => {
                   const entry = { message: event.message, detail: event.detail, timestamp: event.timestamp || Date.now() };
                   // Keep last 20 entries to avoid unbounded growth
+                  const next = [...prev, entry];
+                  return next.length > 20 ? next.slice(-20) : next;
+                });
+                break;
+              case "system_notice":
+                // Mid-run nudge acknowledgment (or other system notes) — surface
+                // it in the activity log so the injected context is visible.
+                setStatusLog(prev => {
+                  const entry = { message: event.content || "Note", timestamp: Date.now() };
                   const next = [...prev, entry];
                   return next.length > 20 ? next.slice(-20) : next;
                 });
@@ -923,7 +977,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
       refetch();
       queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
     }
-  }, [streaming, convId, navigate, refetch, attachedImages, attachedFiles, deepResearch]);
+  }, [streaming, convId, navigate, refetch, attachedImages, attachedFiles, deepResearch, reasoningModeId, activeReasoningLabel]);
 
   // Stable callbacks for MessageBubble — defined once so memo() comparator doesn't see new refs every render
   const handleBranch = useCallback((newConvId: number) => {
@@ -957,6 +1011,22 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     abortRef.current?.abort();
     setStatusLog(prev => [...prev, { message: "Stopped", timestamp: Date.now() }]);
   };
+
+  const handleNudge = useCallback(async () => {
+    const msg = nudgeInput.trim();
+    if (!msg || !streaming || !convId) return;
+    setNudgeInput("");
+    setNudgeSent(true);
+    try {
+      await fetch(`/api/conversations/${convId}/inject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ message: msg }),
+      });
+    } catch { /* ignore — agent may have just finished */ }
+    setTimeout(() => setNudgeSent(false), 3000);
+  }, [nudgeInput, streaming, convId]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1295,6 +1365,34 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
               ))}
             </div>
           )}
+          {/* Mid-run nudge bar — visible only while the agent is working.
+              Adds context to the running agent instead of starting a new turn. */}
+          {streaming && (
+            <div className="flex gap-2 items-center mb-2 px-2 py-1.5 bg-yellow-500/10 border border-yellow-500/20 rounded-md" data-testid="nudge-bar">
+              <span className="text-xs text-yellow-500/80 shrink-0 font-medium">Nudge running agent:</span>
+              <input
+                type="text"
+                value={nudgeInput}
+                onChange={(e) => setNudgeInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleNudge(); } }}
+                placeholder="Add context mid-task without interrupting…"
+                className="flex-1 bg-transparent border-none outline-none text-xs text-yellow-100 placeholder:text-yellow-500/40"
+                data-testid="nudge-input"
+              />
+              {nudgeSent ? (
+                <span className="text-xs text-yellow-400 shrink-0">✓ sent</span>
+              ) : (
+                <button
+                  onClick={handleNudge}
+                  disabled={!nudgeInput.trim()}
+                  className="text-xs text-yellow-400 hover:text-yellow-200 disabled:opacity-30 shrink-0 font-medium transition-colors"
+                  data-testid="nudge-send"
+                >
+                  Add context
+                </button>
+              )}
+            </div>
+          )}
           {deepResearch && (
             <div className="flex items-center gap-1.5 px-2 py-1 mb-1 text-xs text-primary" data-testid="deep-research-banner">
               <Search className="w-3 h-3" />
@@ -1350,6 +1448,50 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
+            {/* v16.74.5: reasoning-mode lightbulb. Lists thinking modes configured
+                on enabled models; selection persists until changed. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant={reasoningModeId ? "default" : "ghost"}
+                  size="icon"
+                  className={`h-9 w-9 shrink-0 ${reasoningModeId ? "ring-2 ring-yellow-500/60 text-yellow-300" : ""}`}
+                  disabled={streaming}
+                  aria-label="Reasoning mode"
+                  title={activeReasoningLabel ? `Reasoning: ${activeReasoningLabel}` : "Reasoning mode"}
+                  data-testid="toggle-reasoning-mode"
+                >
+                  <Lightbulb className="w-4 h-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-52">
+                <DropdownMenuLabel className="text-xs">Reasoning mode</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => setReasoningModeId("")}
+                  className="text-xs"
+                  data-testid="reasoning-mode-off"
+                >
+                  <span className={reasoningModeId === "" ? "font-medium text-yellow-400" : ""}>Off / default</span>
+                </DropdownMenuItem>
+                {reasoningModes.length === 0 && (
+                  <DropdownMenuItem disabled className="text-[10px] text-muted-foreground">
+                    No modes — add them in Settings → Models
+                  </DropdownMenuItem>
+                )}
+                {reasoningModes.map(rm => (
+                  <DropdownMenuItem
+                    key={rm.id}
+                    onClick={() => setReasoningModeId(rm.id)}
+                    className="text-xs"
+                    data-testid={`reasoning-mode-${rm.id}`}
+                  >
+                    <span className={reasoningModeId === rm.id ? "font-medium text-yellow-400" : ""}>{rm.label}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Textarea
               ref={inputRef}
               onChange={e => {

@@ -47,7 +47,15 @@ export function useAuth() {
 
 // ── Theme ───────────────────────────────────────────────────────────
 
-type ThemeValue = "cyberpunk" | "professional" | "lofi";
+import {
+  parseCustomTheme,
+  customThemeCssVars,
+  type CustomThemeConfig,
+} from "@shared/custom-theme";
+
+type ThemeValue = "cyberpunk" | "professional" | "lofi" | "clean" | "custom";
+
+const CUSTOM_VAR_NAMES = Object.keys(customThemeCssVars(parseCustomTheme(null)));
 
 /** Read the active theme from the server settings store and expose all settings globally. */
 async function fetchThemeSetting(): Promise<ThemeValue> {
@@ -59,44 +67,83 @@ async function fetchThemeSetting(): Promise<ThemeValue> {
     (window as any).__AGENT2077_SETTINGS__ = data;
     document.title = data["agent.name"] || "Agent2077";
     const t = data?.theme;
-    if (t === "professional" || t === "lofi") return t;
+    if (t === "professional" || t === "lofi" || t === "clean" || t === "custom") return t;
     return "cyberpunk";
   } catch {
     return "cyberpunk";
   }
 }
 
+/** Apply the user's custom CSS variables (or clear them when leaving custom). */
+function applyCustomVars(config: CustomThemeConfig | null) {
+  const root = document.documentElement;
+  if (!config) {
+    for (const name of CUSTOM_VAR_NAMES) root.style.removeProperty(name);
+    return;
+  }
+  const vars = customThemeCssVars(config);
+  for (const [name, value] of Object.entries(vars)) {
+    root.style.setProperty(name, value);
+  }
+}
+
 /** Apply a theme to the document root element. */
-function applyTheme(theme: ThemeValue) {
+function applyTheme(theme: ThemeValue, customConfig?: CustomThemeConfig | null) {
   const root = document.documentElement;
   // All themes currently use dark mode
   root.classList.add("dark");
-  // Set data-theme — Professional and Lofi get their own attribute;
+  // Set data-theme — Professional, Lofi, Clean and Custom get their own attribute;
   // Cyberpunk uses the default :root / .dark variables (no data-theme needed)
-  if (theme === "professional" || theme === "lofi") {
+  if (theme === "professional" || theme === "lofi" || theme === "clean" || theme === "custom") {
     root.setAttribute("data-theme", theme);
   } else {
     root.removeAttribute("data-theme");
   }
+  // Inline custom vars only apply for the custom theme; clear them otherwise so
+  // switching back to a preset isn't polluted by stale overrides.
+  if (theme === "custom") {
+    const cfg = customConfig ?? readCustomConfigFromGlobal();
+    applyCustomVars(cfg);
+  } else {
+    applyCustomVars(null);
+  }
+}
+
+/** Read the persisted custom config from the globally-exposed settings blob. */
+function readCustomConfigFromGlobal(): CustomThemeConfig {
+  const raw = (window as any).__AGENT2077_SETTINGS__?.["theme.custom"];
+  return parseCustomTheme(typeof raw === "string" ? raw : null);
 }
 
 function initTheme() {
   // Apply default (cyberpunk/dark) immediately to avoid flash, then
   // load the real setting asynchronously
   applyTheme("cyberpunk");
-  fetchThemeSetting().then(applyTheme);
+  fetchThemeSetting().then((t) => applyTheme(t));
 }
 
 /** Call this whenever the theme setting changes (e.g. from SettingsPage). */
-export function setTheme(theme: ThemeValue) {
+export function setTheme(theme: ThemeValue, customConfig?: CustomThemeConfig) {
+  const body: Record<string, string> = { theme };
+  if (theme === "custom" && customConfig) {
+    body["theme.custom"] = JSON.stringify(customConfig);
+    // Keep the global settings blob in sync so a later applyTheme() reads fresh.
+    const g = (window as any).__AGENT2077_SETTINGS__;
+    if (g) g["theme.custom"] = body["theme.custom"];
+  }
   // Persist to server via PATCH /api/settings
   fetch("/api/settings", {
     method: "PATCH",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ theme }),
+    body: JSON.stringify(body),
   }).catch(() => {});
-  applyTheme(theme);
+  applyTheme(theme, customConfig);
+}
+
+/** Live-apply a custom config without persisting — used for the preview while editing. */
+export function previewCustomTheme(customConfig: CustomThemeConfig) {
+  applyTheme("custom", customConfig);
 }
 
 /**

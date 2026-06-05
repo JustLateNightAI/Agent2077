@@ -18,6 +18,30 @@ echo ""
 INSTALL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 echo "[*] Install directory: $INSTALL_DIR"
 
+# ── Version helpers ────────────────────────────────────────────────
+# Minimum Node major version required by Agent2077: package.json engines.node
+# if present, else .nvmrc, else 22.
+required_node_major() {
+    local req=""
+    if command -v node &>/dev/null && [ -f "$INSTALL_DIR/package.json" ]; then
+        req="$(node -e 'try{const e=require("./package.json").engines;if(e&&e.node){const m=String(e.node).match(/(\d+)/);if(m)process.stdout.write(m[1])}}catch(_){}' 2>/dev/null || true)"
+    fi
+    if [ -z "$req" ] && [ -f "$INSTALL_DIR/package.json" ]; then
+        req="$(grep -A4 '"engines"' "$INSTALL_DIR/package.json" 2>/dev/null | grep -oE '"node"[^"]*"[^"]*"' | grep -oE '[0-9]+' | head -n1 || true)"
+    fi
+    if [ -z "$req" ] && [ -f "$INSTALL_DIR/.nvmrc" ]; then
+        req="$(grep -oE '[0-9]+' "$INSTALL_DIR/.nvmrc" 2>/dev/null | head -n1 || true)"
+    fi
+    [ -z "$req" ] && req="22"
+    echo "$req"
+}
+
+# Major version of the currently installed `node`, or empty if none.
+current_node_major() {
+    command -v node &>/dev/null || return 0
+    node -v 2>/dev/null | sed -E 's/^v?([0-9]+).*/\1/'
+}
+
 # ── 1. System updates & essential packages ──────────────────────────
 echo ""
 echo "[1/10] Updating system and installing prerequisites..."
@@ -37,9 +61,23 @@ sudo apt install -y \
     software-properties-common
 echo "  ✓ System packages installed"
 
-# ── 2. Install Node.js 22 via nvm ──────────────────────────────────
+# ── 2. Install Node.js via nvm ─────────────────────────────────────
+NODE_REQUIRED_MAJOR="$(required_node_major)"
 echo ""
-echo "[2/10] Installing Node.js 22..."
+echo "[2/10] Installing Node.js ${NODE_REQUIRED_MAJOR}+ ..."
+
+# Report the status of any Node already on PATH.
+EXISTING_NODE_MAJOR="$(current_node_major)"
+if [ -n "$EXISTING_NODE_MAJOR" ]; then
+    if [ "$EXISTING_NODE_MAJOR" -ge "$NODE_REQUIRED_MAJOR" ]; then
+        echo "  ✓ Node $(node -v) detected — meets requirement (>= ${NODE_REQUIRED_MAJOR}.x)"
+        [ "$EXISTING_NODE_MAJOR" -gt "$NODE_REQUIRED_MAJOR" ] && echo "    (newer than baseline Node ${NODE_REQUIRED_MAJOR} — that's fine)"
+    else
+        echo "  ⚠ Node $(node -v) is older than required (>= ${NODE_REQUIRED_MAJOR}.x) — will install Node ${NODE_REQUIRED_MAJOR} via nvm"
+    fi
+else
+    echo "  → No Node.js on PATH — will install Node ${NODE_REQUIRED_MAJOR} via nvm"
+fi
 
 export NVM_DIR="$HOME/.nvm"
 
@@ -69,10 +107,20 @@ if ! type nvm &>/dev/null; then
     exit 1
 fi
 
-# Install Node 22
-nvm install 22
-nvm use 22
-nvm alias default 22
+# Install the baseline Node only if nvm doesn't already provide one that
+# satisfies the requirement (avoids re-downloading when a newer Node exists).
+NVM_BEST_MAJOR=""
+if NVM_CUR="$(nvm version 2>/dev/null)" && [ "$NVM_CUR" != "N/A" ] && [ -n "$NVM_CUR" ]; then
+    NVM_BEST_MAJOR="$(echo "$NVM_CUR" | sed -E 's/^v?([0-9]+).*/\1/')"
+fi
+if [ -n "$NVM_BEST_MAJOR" ] && [ "$NVM_BEST_MAJOR" -ge "$NODE_REQUIRED_MAJOR" ]; then
+    echo "  ✓ nvm already provides Node v${NVM_BEST_MAJOR}.x (>= ${NODE_REQUIRED_MAJOR}.x) — using it"
+    nvm use "$NVM_BEST_MAJOR" >/dev/null
+else
+    nvm install "$NODE_REQUIRED_MAJOR"
+    nvm use "$NODE_REQUIRED_MAJOR"
+    nvm alias default "$NODE_REQUIRED_MAJOR"
+fi
 
 # Verify node and npm work
 if ! command -v node &>/dev/null; then
@@ -124,9 +172,23 @@ else
     echo "  ✓ $USER already in docker group"
 fi
 
-# Ensure Docker Compose plugin is available
-if ! sudo docker compose version &>/dev/null 2>&1; then
-    sudo apt install -y docker-compose-plugin
+# Ensure the Docker Compose v2 plugin is available (`docker compose`, not the
+# legacy standalone `docker-compose`). Only install when genuinely missing.
+if sudo docker compose version &>/dev/null; then
+    echo "  ✓ Docker Compose v2 plugin already installed: $(sudo docker compose version --short 2>/dev/null || echo present)"
+else
+    if command -v docker-compose &>/dev/null; then
+        echo "  ⚠ Found legacy 'docker-compose' ($(docker-compose --version 2>/dev/null | head -n1)); Agent2077 needs the Compose v2 plugin ('docker compose')."
+    fi
+    echo "  → Installing Docker Compose v2 plugin..."
+    if sudo apt install -y docker-compose-plugin && sudo docker compose version &>/dev/null; then
+        echo "  ✓ Docker Compose v2 plugin installed"
+    else
+        echo "  ✗ Could not install the Compose v2 plugin via apt."
+        echo "    Install manually: sudo apt install docker-compose-plugin"
+        echo "    or see https://docs.docker.com/compose/install/linux/"
+        exit 1
+    fi
 fi
 
 sudo systemctl enable docker

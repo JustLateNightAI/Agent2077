@@ -4,7 +4,7 @@
  * Cloud / OpenAI-compatible providers use the same /v1/chat/completions
  * endpoint with Bearer token auth.
  */
-import { Endpoint, Model } from "../../shared/schema.js";
+import { Endpoint, Model, type ReasoningProfile } from "../../shared/schema.js";
 import { analyticsStore, settingsStore } from "../storage.js";
 import { recordInspectorRequest } from "./inspector.js";
 
@@ -210,6 +210,153 @@ function isMiniMaxModel(modelId: string): boolean {
   return id.includes("minimax") || id.includes("minimax-m2") || id.includes("m2.7");
 }
 
+// ── Reasoning / thinking request shaping (v16.74.5) ─────────────────────────
+// Allowlist of top-level keys a `custom_json` profile may set on the request
+// body. Keeps hand-edited JSON from clobbering core fields (model/messages/etc.)
+// or injecting anything dangerous. `reasoning`, `thinking` and `extra_body` are
+// the common reasoning carriers across OpenAI/Anthropic/OpenRouter/vLLM.
+const CUSTOM_JSON_ALLOWLIST = new Set([
+  "reasoning", "reasoning_effort", "thinking", "extra_body",
+  "thinkingConfig", "chat_template_kwargs", "verbosity", "reasoning_format",
+]);
+
+/**
+ * Inject a prompt-prefix instruction into the message list.
+ * Appends to the first system message if present, otherwise prepends a new one.
+ * Mutates `messages` in place (a shallow copy of the original array is fine —
+ * agent-loop passes a fresh array each call).
+ */
+function injectPromptPrefix(messages: ChatMessage[], prefix: string): void {
+  if (!prefix.trim()) return;
+  const sys = messages.find(m => m.role === "system");
+  if (sys) {
+    sys.content = `${prefix.trim()}\n\n${sys.content ?? ""}`;
+  } else {
+    messages.unshift({ role: "system", content: prefix.trim() });
+  }
+}
+
+/**
+ * Shape the request body for a resolved reasoning profile.
+ *
+ * When `profile` is null we preserve the legacy behaviour: honour the per-model
+ * `thinkingEnabled` boolean exactly as before, so existing setups are unchanged.
+ *
+ * Strategy → request shaping:
+ *  - off                  → explicitly disable where the provider supports it
+ *  - auto                 → send nothing extra (provider/model decides)
+ *  - openai_effort        → reasoning_effort (OpenAI) / reasoning.effort (OpenRouter)
+ *  - anthropic_budget     → thinking { type:'enabled', budget_tokens }
+ *  - gemini_budget        → extra_body.thinkingConfig.thinkingBudget (best-effort)
+ *  - openrouter_extra_body→ merge customBody into reasoning {} (OpenRouter only)
+ *  - prompt_prefix        → inject instruction into the prompt (provider-agnostic)
+ *  - custom_json          → merge allowlisted top-level keys into the body
+ *
+ * Provider-unsupported strategies are no-ops rather than errors, so a profile
+ * authored for one provider never crashes a request on another.
+ */
+export function applyReasoning(
+  body: any,
+  messages: ChatMessage[],
+  endpoint: Endpoint,
+  model: Model,
+  profile: ReasoningProfile | null,
+): void {
+  const isOR = isOpenRouterEndpoint(endpoint);
+  const isLocal = isLocalProvider(endpoint);
+  const isMiniMax = isMiniMaxModel(model.modelId);
+
+  // ── Legacy fallback: no profile selected/configured ──────────────────────
+  if (!profile) {
+    const thinkingOn = !!(model as any).thinkingEnabled;
+    if (isOR) {
+      if (thinkingOn) body.reasoning = { effort: "high" };
+    } else if (isLocal) {
+      if (thinkingOn) body.thinking = { type: "enabled", budget_tokens: 8000 };
+    } else {
+      if (!isMiniMax && !thinkingOn) {
+        body.extra_body = { ...(body.extra_body ?? {}), chat_template_kwargs: { enable_thinking: false } };
+      }
+    }
+    return;
+  }
+
+  const level = profile.level ?? "high";
+
+  switch (profile.strategy) {
+    case "off": {
+      // Explicitly disable thinking where the provider exposes a switch.
+      if (!isOR && !isLocal && !isMiniMax) {
+        body.extra_body = { ...(body.extra_body ?? {}), chat_template_kwargs: { enable_thinking: false } };
+      }
+      // OpenRouter / LM Studio default OFF when no reasoning param is sent — nothing to do.
+      break;
+    }
+    case "auto":
+      // Provider/model decides — send nothing extra.
+      break;
+    case "openai_effort": {
+      if (isOR) {
+        body.reasoning = { ...(body.reasoning ?? {}), effort: level };
+      } else if (isLocal) {
+        // LM Studio honours a thinking block; map effort → a budget heuristic.
+        const budget = level === "low" ? 2000 : level === "medium" ? 6000 : 12000;
+        body.thinking = { type: "enabled", budget_tokens: budget };
+      } else {
+        // OpenAI-compatible (o-series, gpt-5, vLLM shims that accept it).
+        body.reasoning_effort = level;
+      }
+      break;
+    }
+    case "anthropic_budget": {
+      const budget = profile.budgetTokens && profile.budgetTokens > 0 ? profile.budgetTokens : 8000;
+      if (isOR) {
+        // OpenRouter normalises Anthropic thinking via reasoning.max_tokens.
+        body.reasoning = { ...(body.reasoning ?? {}), max_tokens: budget };
+      } else {
+        // Anthropic-native style and LM Studio both accept a thinking block.
+        body.thinking = { type: "enabled", budget_tokens: budget };
+      }
+      break;
+    }
+    case "gemini_budget": {
+      // Gemini's OpenAI-compat path accepts thinkingConfig under extra_body on
+      // some gateways; where unsupported this is a harmless no-op extra field.
+      const budget = profile.budgetTokens && profile.budgetTokens > 0 ? profile.budgetTokens : 8000;
+      body.extra_body = {
+        ...(body.extra_body ?? {}),
+        thinkingConfig: { thinkingBudget: budget },
+      };
+      break;
+    }
+    case "openrouter_extra_body": {
+      // Only meaningful on OpenRouter — merge user's reasoning blob.
+      if (isOR && profile.customBody && typeof profile.customBody === "object") {
+        body.reasoning = { ...(body.reasoning ?? {}), ...profile.customBody };
+      }
+      break;
+    }
+    case "prompt_prefix": {
+      if (profile.promptPrefix) injectPromptPrefix(messages, profile.promptPrefix);
+      break;
+    }
+    case "custom_json": {
+      const blob = profile.customBody;
+      if (blob && typeof blob === "object") {
+        for (const [k, v] of Object.entries(blob)) {
+          if (!CUSTOM_JSON_ALLOWLIST.has(k)) continue;
+          if (k === "extra_body" && typeof v === "object" && v) {
+            body.extra_body = { ...(body.extra_body ?? {}), ...(v as object) };
+          } else {
+            body[k] = v;
+          }
+        }
+      }
+      break;
+    }
+  }
+}
+
 /**
  * Strip <think>...</think> blocks from streamed content.
  * Some models (MiniMax M2.7, DeepSeek-R1, etc.) emit reasoning tokens inline
@@ -340,6 +487,7 @@ export async function chatCompletion(
     requestId?: string;
     conversationId?: number; // Recorded into analytics metadata for per-conversation token usage
     taskType?: string;       // Recorded into analytics for task-type distribution
+    reasoning?: ReasoningProfile | null; // v16.74.5: resolved per-request thinking profile
   } = {}
 ): Promise<LLMResponse> {
   // ── OpenRouter balance floor pre-flight check ─────────────────────────────
@@ -384,27 +532,9 @@ export async function chatCompletion(
     body.tool_choice = "auto";
   }
 
-  // Thinking / extended reasoning mode
-  const thinkingOn = !!(model as any).thinkingEnabled;
-  if (isOpenRouterEndpoint(endpoint)) {
-    // OpenRouter: send reasoning param only when ON — no explicit disable needed
-    if (thinkingOn) body.reasoning = { effort: "high" };
-  } else if (isLocalProvider(endpoint)) {
-    // LM Studio: explicit enable/disable via thinking block
-    if (thinkingOn) {
-      body.thinking = { type: "enabled", budget_tokens: 8000 };
-    }
-    // LM Studio defaults thinking OFF — no action needed when disabled
-  } else {
-    // vLLM and other OpenAI-compatible servers:
-    // MiniMax M2.7 uses --reasoning-parser minimax_m2 at the vLLM level — do NOT
-    // send chat_template_kwargs, it causes a 400 error or unexpected behaviour.
-    // Other vLLM models (Qwen3, etc.) default thinking ON — must explicitly disable.
-    if (!isMiniMaxModel(model.modelId) && !thinkingOn) {
-      body.extra_body = { ...(body.extra_body ?? {}), chat_template_kwargs: { enable_thinking: false } };
-    }
-    // When thinking IS on (or MiniMax): send nothing extra — vLLM handles via --reasoning-parser
-  }
+  // Thinking / extended reasoning mode — shaped by the resolved profile (or the
+  // legacy thinkingEnabled flag when no profile is supplied). See applyReasoning.
+  applyReasoning(body, messages, endpoint, model, options.reasoning ?? null);
 
   const MAX_ATTEMPTS = 8;
   let lastErr: any;
@@ -527,6 +657,7 @@ export async function* chatCompletionStream(
     signal?: AbortSignal; // Optional external abort signal (e.g. loop-level controller)
     conversationId?: number; // Recorded into analytics metadata for per-conversation token usage
     taskType?: string;       // Recorded into analytics for task-type distribution
+    reasoning?: ReasoningProfile | null; // v16.74.5: resolved per-request thinking profile
   } = {}
 ): AsyncGenerator<StreamChunk> {
   // If an external abort signal is already fired, don't even start
@@ -625,24 +756,9 @@ export async function* chatCompletionStream(
     streamBody.tool_choice = "auto";
   }
 
-  // Thinking / extended reasoning mode
-  const streamThinkingOn = !!(model as any).thinkingEnabled;
-  if (isOpenRouterEndpoint(endpoint)) {
-    if (streamThinkingOn) streamBody.reasoning = { effort: "high" };
-  } else if (isLocalProvider(endpoint)) {
-    if (streamThinkingOn) {
-      streamBody.thinking = { type: "enabled", budget_tokens: 8000 };
-    }
-  } else {
-    // vLLM / other OpenAI-compatible:
-    // MiniMax M2.7 uses --reasoning-parser minimax_m2 at the vLLM level — do NOT
-    // send chat_template_kwargs, it causes a 400 error or unexpected behaviour.
-    // Other vLLM models (Qwen3, etc.) default thinking ON — must explicitly disable.
-    if (!isMiniMaxModel(model.modelId) && !streamThinkingOn) {
-      streamBody.extra_body = { ...(streamBody.extra_body ?? {}), chat_template_kwargs: { enable_thinking: false } };
-    }
-    // When thinking IS on (or MiniMax): send nothing extra — vLLM handles via --reasoning-parser
-  }
+  // Thinking / extended reasoning mode — shaped by the resolved profile (or the
+  // legacy thinkingEnabled flag when no profile is supplied). See applyReasoning.
+  applyReasoning(streamBody, messages, endpoint, model, options.reasoning ?? null);
 
   const MAX_STREAM_ATTEMPTS = 8;
 

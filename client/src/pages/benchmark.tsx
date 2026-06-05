@@ -55,6 +55,23 @@ type BenchmarkResult = {
   rating?: number;
 };
 
+type PromptSpec = {
+  prompt: string;
+  category?: string;
+  difficulty?: "easy" | "medium" | "hard";
+  expectedBehavior?: string;
+  requires?: ("tools" | "internet")[];
+};
+
+function difficultyClass(d?: string) {
+  switch (d) {
+    case "easy": return "border-green-500/30 text-green-400";
+    case "medium": return "border-amber-500/30 text-amber-400";
+    case "hard": return "border-red-500/30 text-red-400";
+    default: return "border-border text-muted-foreground";
+  }
+}
+
 type BenchmarkRun = {
   id: number;
   suiteId: number;
@@ -95,7 +112,7 @@ function StarRating({ value, onChange, readonly }: { value?: number; onChange?: 
 function RunResultCard({ run, suite, onRate }: { run: BenchmarkRun; suite?: BenchmarkSuite; onRate: (runId: number, promptIndex: number, rating: number) => void }) {
   const [expanded, setExpanded] = useState(false);
   let results: BenchmarkResult[] = [];
-  let prompts: { prompt: string; category?: string }[] = [];
+  let prompts: PromptSpec[] = [];
   try { results = JSON.parse(run.results || "[]"); } catch {}
   try { prompts = JSON.parse(suite?.prompts || "[]"); } catch {}
 
@@ -131,11 +148,17 @@ function RunResultCard({ run, suite, onRate }: { run: BenchmarkRun; suite?: Benc
         <CardContent className="px-3 pb-3 pt-2 space-y-3">
           {results.map((r, i) => (
             <div key={i} className="border border-border rounded-md p-2 space-y-2" data-testid={`result-${run.id}-${i}`}>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <Badge variant="outline" className="text-[10px]">#{i + 1}</Badge>
                 {prompts[r.promptIndex]?.category && (
                   <Badge variant="outline" className="text-[10px]">{prompts[r.promptIndex].category}</Badge>
                 )}
+                {prompts[r.promptIndex]?.difficulty && (
+                  <Badge variant="outline" className={`text-[10px] ${difficultyClass(prompts[r.promptIndex].difficulty)}`}>{prompts[r.promptIndex].difficulty}</Badge>
+                )}
+                {prompts[r.promptIndex]?.requires?.map(req => (
+                  <Badge key={req} variant="outline" className="text-[10px] border-primary/30 text-primary">{req}</Badge>
+                ))}
                 <div className="flex items-center gap-3 ml-auto text-[10px] text-muted-foreground">
                   {r.tokenCount !== undefined && <span>{r.tokenCount} tok</span>}
                   {r.durationMs !== undefined && <span>{(r.durationMs / 1000).toFixed(2)}s</span>}
@@ -143,6 +166,11 @@ function RunResultCard({ run, suite, onRate }: { run: BenchmarkRun; suite?: Benc
               </div>
               {prompts[r.promptIndex] && (
                 <p className="text-[10px] text-muted-foreground bg-muted/30 rounded p-1.5 font-mono">{prompts[r.promptIndex].prompt}</p>
+              )}
+              {prompts[r.promptIndex]?.expectedBehavior && (
+                <p className="text-[10px] text-muted-foreground italic border-l-2 border-primary/30 pl-2">
+                  <span className="not-italic font-mono text-primary/70">expected: </span>{prompts[r.promptIndex].expectedBehavior}
+                </p>
               )}
               <div className="bg-card border border-border rounded p-2">
                 <p className="text-[10px] whitespace-pre-wrap leading-relaxed line-clamp-6">{r.response}</p>
@@ -182,6 +210,14 @@ export default function BenchmarkPage() {
       return res.json();
     },
     enabled: selectedSuiteId !== null,
+    // Poll while any run is still executing so the UI flips to completed/failed
+    // and shows results without needing to start another run. Stops once every
+    // run has reached a terminal state.
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasActive = Array.isArray(data) && data.some(r => r.status !== "completed" && r.status !== "failed");
+      return hasActive ? 2000 : false;
+    },
   });
 
   const enabledModels = models.filter(m => m.isEnabled);
@@ -290,8 +326,13 @@ export default function BenchmarkPage() {
                     >
                       <FlaskConical className="w-3 h-3 shrink-0" />
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs truncate">{suite.name}</p>
-                        <p className="text-[10px] text-muted-foreground">{promptCount} prompts</p>
+                        <p className="text-xs truncate" title={suite.name}>{suite.name.replace(/^\[Preset\]\s*/, "")}</p>
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                          {suite.name.startsWith("[Preset]") && (
+                            <span className="text-primary/70">preset ·</span>
+                          )}
+                          {promptCount} prompts
+                        </p>
                       </div>
                       <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
                         <Button
@@ -374,7 +415,7 @@ export default function BenchmarkPage() {
             /* Runs list */
             <div className="flex-1 overflow-hidden flex flex-col">
               <div className="border-b border-border px-4 py-2 flex items-center gap-3">
-                <span className="text-xs font-mono text-muted-foreground">{selectedSuite?.name}</span>
+                <span className="text-xs font-mono text-muted-foreground">{selectedSuite?.name?.replace(/^\[Preset\]\s*/, "")}</span>
                 {compareMode && (
                   <span className="text-[10px] text-muted-foreground ml-auto">
                     Select 2 runs to compare ({compareRunIds.length}/2 selected)

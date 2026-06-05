@@ -110,6 +110,12 @@ export function registerTool(name: string, handler: ToolHandler) {
   console.log(`[Tools] Registered: ${name} (${handler.category})`);
 }
 
+export function unregisterTool(name: string): boolean {
+  const removed = tools.delete(name);
+  if (removed) console.log(`[Tools] Unregistered: ${name}`);
+  return removed;
+}
+
 export function getTool(name: string): ToolHandler | undefined {
   return tools.get(name);
 }

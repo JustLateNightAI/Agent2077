@@ -9,7 +9,7 @@
  *  - sse: connects to an SSE endpoint, communicates via JSON-RPC over HTTP
  */
 import { spawn, type ChildProcess } from "child_process";
-import { registerTool, type ToolHandler } from "../tools/registry.js";
+import { registerTool, unregisterTool, type ToolHandler } from "../tools/registry.js";
 import { mcpServerStore } from "../storage.js";
 
 interface JsonRpcRequest {
@@ -44,9 +44,20 @@ interface McpConnection {
   transport: "stdio" | "sse";
   process?: ChildProcess;
   tools: McpTool[];
+  registeredToolNames: string[]; // Agent2077-registry names to clean up on disconnect
   pendingRequests: Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>;
   nextId: number;
   buffer: string; // line buffer for stdout
+}
+
+/**
+ * Build a registry-safe tool name. The LLM tool-call API only allows
+ * [a-zA-Z0-9_-], so we sanitize both the server name and the MCP tool name
+ * and prefix with `mcp_` to avoid colliding with Agent2077's native tools.
+ */
+export function mcpToolName(serverName: string, toolName: string): string {
+  const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+  return `mcp_${clean(serverName)}_${clean(toolName)}`;
 }
 
 /**
@@ -76,6 +87,7 @@ async function connectViaStdio(server: any): Promise<void> {
       serverId: server.id,
       transport: "stdio",
       tools: [],
+      registeredToolNames: [],
       pendingRequests: new Map(),
       nextId: 1,
       buffer: "",
@@ -165,6 +177,7 @@ async function connectViaSse(server: any): Promise<void> {
     serverId: server.id,
     transport: "sse",
     tools: [],
+    registeredToolNames: [],
     pendingRequests: new Map(),
     nextId: 1,
     buffer: "",
@@ -269,8 +282,9 @@ async function initializeAndRegister(conn: McpConnection, server: any): Promise<
   console.log(`[MCP:${server.name}] Connected! Found ${mcpTools.length} tools`);
 
   // Step 3: register each MCP tool in the Agent2077 registry
+  conn.registeredToolNames = [];
   for (const mcpTool of mcpTools) {
-    const toolName = `mcp_${server.name.toLowerCase().replace(/\s+/g, "_")}_${mcpTool.name}`;
+    const toolName = mcpToolName(server.name, mcpTool.name);
 
     const handler: ToolHandler = {
       category: "system",
@@ -305,6 +319,7 @@ async function initializeAndRegister(conn: McpConnection, server: any): Promise<
     };
 
     registerTool(toolName, handler);
+    conn.registeredToolNames.push(toolName);
   }
 
   // Update DB
@@ -322,12 +337,16 @@ export async function disconnectMcpServer(serverId: number): Promise<void> {
   const conn = activeConnections.get(serverId);
   if (!conn) return;
 
+  // Remove this server's tools from the registry so they aren't offered to the
+  // model while the server is down.
+  for (const name of conn.registeredToolNames) unregisterTool(name);
+
   if (conn.process) {
     try { conn.process.kill("SIGTERM"); } catch { /* already dead */ }
   }
 
   activeConnections.delete(serverId);
-  mcpServerStore.update(serverId, { status: "disconnected" });
+  mcpServerStore.update(serverId, { status: "disconnected", toolCount: 0 });
   console.log(`[MCP] Disconnected server ${serverId}`);
 }
 

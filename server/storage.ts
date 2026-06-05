@@ -312,6 +312,29 @@ export const benchmarkStore = {
   updateRun(id: number, data: Partial<s.InsertBenchmarkRun>) {
     return db.update(s.benchmarkRuns).set(data).where(eq(s.benchmarkRuns.id, id)).returning().get();
   },
+  /**
+   * Seed shipped-with-the-app benchmark suites. Idempotent and non-destructive:
+   * a preset is inserted only if no suite with the same name exists, so re-runs
+   * don't duplicate, user-created suites are untouched, and user edits to a
+   * preset's prompts are preserved (we never overwrite an existing row).
+   * Returns the number of suites newly inserted.
+   */
+  seedPresets(presets: { name: string; description: string; prompts: unknown[] }[]): number {
+    const existing = new Set(
+      db.select({ name: s.benchmarkSuites.name }).from(s.benchmarkSuites).all().map(r => r.name),
+    );
+    let inserted = 0;
+    for (const preset of presets) {
+      if (existing.has(preset.name)) continue;
+      db.insert(s.benchmarkSuites).values({
+        name: preset.name,
+        description: preset.description,
+        prompts: JSON.stringify(preset.prompts),
+      }).run();
+      inserted++;
+    }
+    return inserted;
+  },
 };
 
 // ── Analytics ───────────────────────────────────────────────────────

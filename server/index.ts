@@ -10,7 +10,8 @@ import path from "path";
 import { registerRoutes } from "./routes.js";
 import { serveStatic } from "./static.js";
 import { initFTS, runMigrations, initNewTables, bootstrapSchema } from "./db.js";
-import { userStore, settingsStore, projectStore, conversationStore, getProjectsRoot } from "./storage.js";
+import { userStore, settingsStore, projectStore, conversationStore, getProjectsRoot, benchmarkStore } from "./storage.js";
+import { PRESET_SUITES } from "./lib/benchmark-presets.js";
 import { isTlsEnabled, ensureCerts } from "./lib/tls-cert.js";
 import { dockerManager } from "./docker/manager.js";
 import { syncNginxForRunningApps } from "./lib/nginx-apps.js";
@@ -157,6 +158,14 @@ async function init() {
 
   // Initialize default settings
   settingsStore.initDefaults();
+
+  // Seed preloaded benchmark suites (idempotent — only inserts missing presets)
+  try {
+    const added = benchmarkStore.seedPresets(PRESET_SUITES);
+    if (added > 0) console.log(`[Init] Seeded ${added} preset benchmark suite(s)`);
+  } catch (err: any) {
+    console.warn("[Init] Benchmark preset seeding failed:", err.message);
+  }
 
   // Initialize Docker manager
   await dockerManager.init();

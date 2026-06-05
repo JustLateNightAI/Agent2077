@@ -47,6 +47,11 @@ export const models = sqliteTable("models", {
   temperature: real("temperature"),  // Per-model temperature override (null = use smart default)
   topP: real("top_p"),               // Per-model top_p override (null = use smart default)
   thinkingEnabled: integer("thinking_enabled", { mode: "boolean" }).notNull().default(false),
+  // v16.74.5: per-model reasoning/thinking profiles. JSON array of ReasoningProfile
+  // (see below). Lets each model carry its own set of thinking modes — selectable
+  // per-message via the chat lightbulb selector. Null/empty = no custom modes
+  // (legacy thinkingEnabled still honoured as an implicit "default high" profile).
+  reasoningProfiles: text("reasoning_profiles"),
   notes: text("notes"),
   createdAt: text("created_at").notNull().$defaultFn(() => new Date().toISOString()),
 });
@@ -401,3 +406,97 @@ export type GenerationType = "txt2img" | "img2img" | "inpaint" | "upscale" | "co
 export type TaskType = "coding" | "research" | "creative" | "math" | "general";
 export type AppStatus = "building" | "running" | "stopped" | "error";
 export type SubtaskStatus = "pending" | "running" | "completed" | "failed" | "skipped";
+
+// ── Reasoning / Thinking Profiles (v16.74.5) ────────────────────────
+// Per-model, user-defined "thinking modes". Stored as a JSON array in
+// models.reasoningProfiles. The chat lightbulb selector lists the configured
+// profiles for the active model; the chosen profile shapes the LLM request.
+//
+// `strategy` controls HOW the request body is shaped (see server/lib/llm-client.ts
+// applyReasoning). It is intentionally provider-agnostic so the same profile can
+// be reused across endpoints — strategies that don't apply to the current provider
+// are no-ops rather than errors.
+export type ReasoningStrategy =
+  | "off"                    // explicitly disable thinking (where the provider supports disabling)
+  | "auto"                   // let the provider/model decide — send nothing extra
+  | "openai_effort"          // OpenAI / OpenRouter: reasoning_effort | reasoning.effort
+  | "anthropic_budget"       // Anthropic-style: thinking { type: 'enabled', budget_tokens }
+  | "gemini_budget"          // Gemini: thinkingConfig.thinkingBudget (best-effort on current path)
+  | "openrouter_extra_body"  // OpenRouter: merge into reasoning {} (effort/max_tokens/exclude)
+  | "prompt_prefix"          // inject an instruction prefix into the user/system prompt
+  | "custom_json";           // merge an allowlisted/top-level JSON blob into the request body
+
+export type ReasoningLevel = "low" | "medium" | "high";
+
+export interface ReasoningProfile {
+  id: string;                 // stable unique id within the model (e.g. crypto/random)
+  label: string;              // display name shown in the selector ("OpenAI High", "Budget 8k")
+  strategy: ReasoningStrategy;
+  level?: ReasoningLevel;     // for openai_effort
+  budgetTokens?: number;      // for anthropic_budget / gemini_budget
+  promptPrefix?: string;      // for prompt_prefix
+  customBody?: Record<string, any>; // for custom_json / openrouter_extra_body
+  isDefault?: boolean;        // selected by default in the lightbulb when none chosen
+}
+
+// Zod validator — used by the model PATCH route to reject malformed profiles
+// before they reach the DB. Kept permissive on optional fields so presets and
+// hand-edited JSON both validate.
+export const reasoningProfileSchema = z.object({
+  id: z.string().min(1).max(64),
+  label: z.string().min(1).max(80),
+  strategy: z.enum([
+    "off", "auto", "openai_effort", "anthropic_budget",
+    "gemini_budget", "openrouter_extra_body", "prompt_prefix", "custom_json",
+  ]),
+  level: z.enum(["low", "medium", "high"]).optional(),
+  budgetTokens: z.number().int().positive().max(200000).optional(),
+  promptPrefix: z.string().max(4000).optional(),
+  customBody: z.record(z.any()).optional(),
+  isDefault: z.boolean().optional(),
+});
+
+export const reasoningProfilesSchema = z.array(reasoningProfileSchema).max(20);
+
+/** Parse the stored JSON column into a typed array, tolerating null/garbage. */
+export function parseReasoningProfiles(raw?: string | null): ReasoningProfile[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    const result = reasoningProfilesSchema.safeParse(parsed);
+    return result.success ? result.data : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Resolve which profile to apply for a request.
+ * - If a profileId is given and matches a configured profile, use it.
+ * - Else fall back to the model's default profile (isDefault) if any.
+ * - Else, for backwards-compat, if the legacy thinkingEnabled flag is on and no
+ *   profiles are configured, synthesize an implicit "high effort" profile.
+ * - Else null (no reasoning shaping).
+ */
+export function resolveReasoningProfile(
+  model: { reasoningProfiles?: string | null; thinkingEnabled?: boolean | null },
+  profileId?: string | null,
+  profileLabel?: string | null,
+): ReasoningProfile | null {
+  const profiles = parseReasoningProfiles(model.reasoningProfiles);
+  if (profileId || profileLabel) {
+    if (profileId === "__off__") return { id: "__off__", label: "Off", strategy: "off" };
+    // Match by id first; fall back to label. Under auto-routing the chosen id
+    // belongs to whichever model the chat UI deduped against — a different
+    // routed model may carry the same mode under a different id but same label.
+    const found = profiles.find(p => p.id === profileId)
+      ?? (profileLabel ? profiles.find(p => p.label === profileLabel) : undefined);
+    if (found) return found;
+  }
+  const def = profiles.find(p => p.isDefault);
+  if (def) return def;
+  if (profiles.length === 0 && model.thinkingEnabled) {
+    return { id: "__legacy__", label: "Thinking", strategy: "openai_effort", level: "high" };
+  }
+  return null;
+}

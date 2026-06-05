@@ -22,6 +22,31 @@ warn() { echo -e "  ${YELLOW}⚠${RESET}  $*"; }
 fail() { echo -e "  ${RED}✗${RESET} $*"; exit 1; }
 hr()   { echo -e "${CYAN}──────────────────────────────────────────────────────${RESET}"; }
 
+# ── Version helpers ────────────────────────────────────────────────
+# Minimum Node major version required by Agent2077. Read from package.json
+# "engines.node" if present, else .nvmrc, else fall back to 22.
+required_node_major() {
+    local req=""
+    if command -v node &>/dev/null && [ -f "$INSTALL_DIR/package.json" ]; then
+        req="$(node -e 'try{const e=require("./package.json").engines;if(e&&e.node){const m=String(e.node).match(/(\d+)/);if(m)process.stdout.write(m[1])}}catch(_){}' 2>/dev/null || true)"
+    fi
+    if [ -z "$req" ] && [ -f "$INSTALL_DIR/package.json" ]; then
+        # grep-based fallback when node isn't available yet
+        req="$(grep -A4 '"engines"' "$INSTALL_DIR/package.json" 2>/dev/null | grep -oE '"node"[^"]*"[^"]*"' | grep -oE '[0-9]+' | head -n1 || true)"
+    fi
+    if [ -z "$req" ] && [ -f "$INSTALL_DIR/.nvmrc" ]; then
+        req="$(grep -oE '[0-9]+' "$INSTALL_DIR/.nvmrc" 2>/dev/null | head -n1 || true)"
+    fi
+    [ -z "$req" ] && req="22"
+    echo "$req"
+}
+
+# Major version of the currently installed `node`, or empty if none.
+current_node_major() {
+    command -v node &>/dev/null || return 0
+    node -v 2>/dev/null | sed -E 's/^v?([0-9]+).*/\1/'
+}
+
 # ── Banner ─────────────────────────────────────────────────────────
 clear
 echo ""
@@ -76,10 +101,28 @@ ok "Core packages ready"
 echo ""
 
 # ══════════════════════════════════════════════════════════════════
-#  STEP 2 — Node.js 22 via nvm
+#  STEP 2 — Node.js (via nvm)
 # ══════════════════════════════════════════════════════════════════
-echo -e "${BOLD}[2/10] Node.js 22 (via nvm)${RESET}"
+NODE_REQUIRED_MAJOR="$(required_node_major)"
+echo -e "${BOLD}[2/10] Node.js ${NODE_REQUIRED_MAJOR}+ (via nvm)${RESET}"
 hr
+
+# ── Detect any Node already on PATH and report its status ──────────
+EXISTING_NODE_MAJOR="$(current_node_major)"
+if [ -n "$EXISTING_NODE_MAJOR" ]; then
+    if [ "$EXISTING_NODE_MAJOR" -ge "$NODE_REQUIRED_MAJOR" ]; then
+        ok "Node $(node -v) detected — meets requirement (>= ${NODE_REQUIRED_MAJOR}.x)"
+        if [ "$EXISTING_NODE_MAJOR" -gt "$NODE_REQUIRED_MAJOR" ]; then
+            info "This is newer than the baseline Node ${NODE_REQUIRED_MAJOR}; that's fine."
+        fi
+    else
+        warn "Node $(node -v) detected but is older than required (>= ${NODE_REQUIRED_MAJOR}.x)."
+        info "Will install Node ${NODE_REQUIRED_MAJOR} via nvm — your existing Node is left untouched."
+    fi
+else
+    info "No Node.js found on PATH — will install Node ${NODE_REQUIRED_MAJOR} via nvm."
+fi
+
 export NVM_DIR="$HOME/.nvm"
 
 if [ ! -d "$NVM_DIR" ]; then
@@ -97,12 +140,32 @@ fi
 
 type nvm &>/dev/null || fail "nvm function not available after sourcing."
 
-nvm install 22 --no-progress
-nvm use 22
-nvm alias default 22
+# Only install the baseline Node if nvm doesn't already have a version that
+# satisfies the requirement — this avoids re-downloading when a newer Node
+# is already managed by nvm.
+NVM_BEST_MAJOR=""
+if NVM_CUR="$(nvm version 2>/dev/null)" && [ "$NVM_CUR" != "N/A" ] && [ -n "$NVM_CUR" ]; then
+    NVM_BEST_MAJOR="$(echo "$NVM_CUR" | sed -E 's/^v?([0-9]+).*/\1/')"
+fi
+
+if [ -n "$NVM_BEST_MAJOR" ] && [ "$NVM_BEST_MAJOR" -ge "$NODE_REQUIRED_MAJOR" ]; then
+    ok "nvm already provides Node v${NVM_BEST_MAJOR}.x (>= ${NODE_REQUIRED_MAJOR}.x) — using it"
+    nvm use "$NVM_BEST_MAJOR" >/dev/null
+else
+    info "Installing Node ${NODE_REQUIRED_MAJOR} via nvm..."
+    nvm install "$NODE_REQUIRED_MAJOR" --no-progress
+    nvm use "$NODE_REQUIRED_MAJOR"
+    nvm alias default "$NODE_REQUIRED_MAJOR"
+fi
 
 command -v node &>/dev/null || fail "'node' not found after nvm install."
 command -v npm  &>/dev/null || fail "'npm'  not found after nvm install."
+
+# Final guard: whatever we ended up with must satisfy the requirement.
+FINAL_NODE_MAJOR="$(current_node_major)"
+if [ -n "$FINAL_NODE_MAJOR" ] && [ "$FINAL_NODE_MAJOR" -lt "$NODE_REQUIRED_MAJOR" ]; then
+    fail "Active Node is v${FINAL_NODE_MAJOR}.x but Agent2077 needs >= ${NODE_REQUIRED_MAJOR}.x. Run 'nvm use ${NODE_REQUIRED_MAJOR}' and re-run."
+fi
 
 NODE_BIN="$(command -v node)"
 ok "Node $(node -v) / npm $(npm -v)"
@@ -141,8 +204,27 @@ else
     ok "$USER already in docker group"
 fi
 
-if ! sudo docker compose version &>/dev/null 2>&1; then
-    sudo apt-get install -y -qq docker-compose-plugin
+# ── Docker Compose v2 plugin ───────────────────────────────────────
+# Agent2077 uses the Compose v2 plugin (`docker compose`, space — not the
+# legacy standalone `docker-compose` binary). Detect what's present and only
+# install the plugin when it's genuinely missing.
+if sudo docker compose version &>/dev/null; then
+    ok "Docker Compose v2 plugin already installed: $(sudo docker compose version --short 2>/dev/null || sudo docker compose version 2>/dev/null | head -n1)"
+else
+    if command -v docker-compose &>/dev/null; then
+        warn "Found legacy standalone 'docker-compose' ($(docker-compose --version 2>/dev/null | head -n1))."
+        warn "Agent2077 requires the Compose v2 plugin ('docker compose'), not the legacy binary."
+    fi
+    info "Installing Docker Compose v2 plugin (docker-compose-plugin)..."
+    if sudo apt-get install -y -qq docker-compose-plugin && sudo docker compose version &>/dev/null; then
+        ok "Docker Compose v2 plugin installed: $(sudo docker compose version --short 2>/dev/null || echo present)"
+    else
+        warn "Could not install the Compose v2 plugin via apt on this system."
+        warn "Install it manually, e.g.:"
+        warn "    sudo apt-get install docker-compose-plugin"
+        warn "  or follow https://docs.docker.com/compose/install/linux/"
+        fail "Docker Compose v2 plugin is required to continue (Step 6 runs 'docker compose up')."
+    fi
 fi
 
 sudo systemctl enable --now docker

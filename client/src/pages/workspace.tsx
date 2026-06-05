@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -81,7 +81,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
-  DropdownMenuTrigger,
+  DropdownMenuTrigger, DropdownMenuLabel, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import {
   Code, Play, Square, Download, Upload, Plus, File, Folder,
@@ -92,6 +92,7 @@ import {
   CircleDot, CheckCircle2, Circle,
   FileCode, FileText, FileJson, FileCog, Package,
   GitBranch, GitCommit, GitPullRequest, AlertCircle, Diff, ImagePlus, ArrowDown,
+  Lightbulb,
 } from "lucide-react";
 
 // ────────────── Types ──────────────
@@ -265,6 +266,21 @@ function CodeEditor({
           ".cm-cursor": { borderLeftColor: "#D4622A", borderLeftWidth: "2px" },
           ".cm-selectionBackground": { backgroundColor: "rgba(212,98,42,0.12) !important" },
           ".cm-lineNumbers": { color: "#B09880" },
+        }),
+        syntaxHighlighting(defaultHighlightStyle),
+      ];
+    } else if (theme === "clean") {
+      // Clean Pro — soft off-white editor, calm teal accent, no glow
+      themeExt = [
+        EditorView.theme({
+          "&": { backgroundColor: "#FFFFFF", color: "#1d2329" },
+          ".cm-content": { fontFamily: "'JetBrains Mono','Fira Code',monospace", fontSize: "12.5px", lineHeight: "1.6" },
+          ".cm-gutters": { backgroundColor: "#F7F7F6", color: "#737d85", border: "none", borderRight: "1px solid #e4e2df" },
+          ".cm-activeLine": { backgroundColor: "rgba(42,157,143,0.05)" },
+          ".cm-activeLineGutter": { backgroundColor: "rgba(42,157,143,0.08)" },
+          ".cm-cursor": { borderLeftColor: "#2a9d8f" },
+          ".cm-selectionBackground": { backgroundColor: "rgba(42,157,143,0.14) !important" },
+          ".cm-lineNumbers": { color: "#9aa3aa" },
         }),
         syntaxHighlighting(defaultHighlightStyle),
       ];
@@ -1108,6 +1124,8 @@ function WorkspaceChat({
   const [routingInfo, setRoutingInfo] = useState<any>(null);
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
   const [statusLog, setStatusLog] = useState<Array<{ message: string; detail?: string; timestamp: number }>>([]);
+  const [nudgeInput, setNudgeInput] = useState("");
+  const [nudgeSent, setNudgeSent] = useState(false);
   const [currentConvId, setCurrentConvId] = useState<number | null>(conversationId);
   const [attachedImages, setAttachedImages] = useState<File[]>([]);
   const [pendingImages, setPendingImages] = useState<Array<{name: string, base64: string, mimeType: string}>>([]);
@@ -1116,6 +1134,28 @@ function WorkspaceChat({
   const [isDragging, setIsDragging] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [showJumpToPresent, setShowJumpToPresent] = useState(false);
+  // v16.74.5: per-input reasoning mode (persistent until changed). See chat.tsx.
+  const [reasoningModeId, setReasoningModeId] = useState<string>("");
+  const { data: allModels = [] } = useQuery<any[]>({
+    queryKey: ["/api/models"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/models`);
+      return res.json();
+    },
+  });
+  const reasoningModes = useMemo(() => {
+    const seen = new Map<string, { id: string; label: string }>();
+    for (const m of allModels) {
+      if (!m?.isEnabled || !m?.reasoningProfiles) continue;
+      let profiles: any[] = [];
+      try { profiles = JSON.parse(m.reasoningProfiles); } catch { continue; }
+      for (const p of profiles) {
+        if (p?.id && p?.label && !seen.has(p.label)) seen.set(p.label, { id: p.id, label: p.label });
+      }
+    }
+    return Array.from(seen.values());
+  }, [allModels]);
+  const activeReasoningLabel = reasoningModes.find(r => r.id === reasoningModeId)?.label;
   // Confirmation banner + diff preview state (must live in this component — used in SSE handler)
   const [pendingConfirm, setPendingConfirm] = useState<{
     id: string;
@@ -1235,6 +1275,13 @@ function WorkspaceChat({
                 case "status":
                   setStatusLog(prev => {
                     const entry = { message: data.message, detail: data.detail, timestamp: data.timestamp || Date.now() };
+                    const next = [...prev, entry];
+                    return next.length > 20 ? next.slice(-20) : next;
+                  });
+                  break;
+                case "system_notice":
+                  setStatusLog(prev => {
+                    const entry = { message: data.content || "Note", timestamp: Date.now() };
                     const next = [...prev, entry];
                     return next.length > 20 ? next.slice(-20) : next;
                   });
@@ -1367,6 +1414,8 @@ function WorkspaceChat({
           conversationId: convId,
           message: msg,
           systemPrompt,
+          reasoningModeId: reasoningModeId || undefined,
+          reasoningModeLabel: activeReasoningLabel || undefined,
           images: imageData.length > 0 ? imageData : undefined,
           attachments: attachedFiles.length > 0 ? attachedFiles : undefined,
         }),
@@ -1420,6 +1469,13 @@ function WorkspaceChat({
               case "status":
                 setStatusLog(prev => {
                   const entry = { message: event.message, detail: event.detail, timestamp: event.timestamp || Date.now() };
+                  const next = [...prev, entry];
+                  return next.length > 20 ? next.slice(-20) : next;
+                });
+                break;
+              case "system_notice":
+                setStatusLog(prev => {
+                  const entry = { message: event.content || "Note", timestamp: Date.now() };
                   const next = [...prev, entry];
                   return next.length > 20 ? next.slice(-20) : next;
                 });
@@ -1486,7 +1542,7 @@ function WorkspaceChat({
       abortRef.current = null;
       refetch();
     }
-  }, [input, streaming, convId, project, activeFile, refetch, onFilesChanged, attachedImages, attachedFiles]);
+  }, [input, streaming, convId, project, activeFile, refetch, onFilesChanged, attachedImages, attachedFiles, reasoningModeId, activeReasoningLabel]);
 
   const handleStop = () => {
     if (requestIdRef.current) {
@@ -1500,6 +1556,22 @@ function WorkspaceChat({
     abortRef.current?.abort();
     setStatusLog(prev => [...prev, { message: "Stopped", timestamp: Date.now() }]);
   };
+
+  const handleNudge = useCallback(async () => {
+    const msg = nudgeInput.trim();
+    if (!msg || !streaming || !convId) return;
+    setNudgeInput("");
+    setNudgeSent(true);
+    try {
+      await fetch(`/api/conversations/${convId}/inject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ message: msg }),
+      });
+    } catch { /* ignore — agent may have just finished */ }
+    setTimeout(() => setNudgeSent(false), 3000);
+  }, [nudgeInput, streaming, convId]);
 
   // Filter to displayable messages (user + assistant only)
   const displayMessages = messages.filter(m => m.role === "user" || m.role === "assistant");
@@ -1720,6 +1792,35 @@ function WorkspaceChat({
             ))}
           </div>
         )}
+        {/* Mid-run nudge bar — add context to the running project agent without
+            interrupting it or starting a new turn. Project context is preserved
+            because the nudge targets this project's conversation/run. */}
+        {streaming && (
+          <div className="flex gap-2 items-center mb-2 px-2 py-1.5 bg-yellow-500/10 border border-yellow-500/20 rounded-md" data-testid="ws-nudge-bar">
+            <span className="text-xs text-yellow-500/80 shrink-0 font-medium">Nudge running agent:</span>
+            <input
+              type="text"
+              value={nudgeInput}
+              onChange={(e) => setNudgeInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleNudge(); } }}
+              placeholder="Add context mid-task without interrupting…"
+              className="flex-1 bg-transparent border-none outline-none text-xs text-yellow-100 placeholder:text-yellow-500/40"
+              data-testid="ws-nudge-input"
+            />
+            {nudgeSent ? (
+              <span className="text-xs text-yellow-400 shrink-0">✓ sent</span>
+            ) : (
+              <button
+                onClick={handleNudge}
+                disabled={!nudgeInput.trim()}
+                className="text-xs text-yellow-400 hover:text-yellow-200 disabled:opacity-30 shrink-0 font-medium transition-colors"
+                data-testid="ws-nudge-send"
+              >
+                Add context
+              </button>
+            )}
+          </div>
+        )}
         <div className="flex items-end gap-1">
           {/* Hidden image file input */}
           <input
@@ -1747,6 +1848,40 @@ function WorkspaceChat({
           >
             <ImagePlus className="w-4 h-4" />
           </Button>
+          {/* v16.74.5: reasoning-mode lightbulb (shares /api/chat with main chat). */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant={reasoningModeId ? "default" : "ghost"}
+                size="icon"
+                className={`h-9 w-9 shrink-0 ${reasoningModeId ? "ring-2 ring-yellow-500/60 text-yellow-300" : ""}`}
+                disabled={streaming}
+                aria-label="Reasoning mode"
+                title={activeReasoningLabel ? `Reasoning: ${activeReasoningLabel}` : "Reasoning mode"}
+                data-testid="ws-toggle-reasoning-mode"
+              >
+                <Lightbulb className="w-4 h-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-52">
+              <DropdownMenuLabel className="text-xs">Reasoning mode</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => setReasoningModeId("")} className="text-xs">
+                <span className={reasoningModeId === "" ? "font-medium text-yellow-400" : ""}>Off / default</span>
+              </DropdownMenuItem>
+              {reasoningModes.length === 0 && (
+                <DropdownMenuItem disabled className="text-[10px] text-muted-foreground">
+                  No modes — add them in Settings → Models
+                </DropdownMenuItem>
+              )}
+              {reasoningModes.map(rm => (
+                <DropdownMenuItem key={rm.id} onClick={() => setReasoningModeId(rm.id)} className="text-xs" data-testid={`ws-reasoning-mode-${rm.id}`}>
+                  <span className={reasoningModeId === rm.id ? "font-medium text-yellow-400" : ""}>{rm.label}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Textarea
             ref={textareaRef}
             value={input}
