@@ -270,7 +270,12 @@ registerTool("deploy_app", {
       return {
         success: false,
         output:
-          "Docker is not available. Cannot deploy apps. Make sure Docker is running: sudo systemctl start docker",
+          "Docker is not available, so apps cannot be deployed. This usually means the Docker daemon " +
+          "is not running, or the Agent2077 process user lacks permission to access the Docker socket " +
+          "(/var/run/docker.sock). Do NOT attempt to start Docker or change permissions from here — " +
+          "ask the user to ensure Docker is running and that the Agent2077 user is in the 'docker' group " +
+          "(e.g. they can run `sudo systemctl start docker` and `sudo usermod -aG docker $USER` themselves, " +
+          "then restart Agent2077). Once Docker is reachable, retry the deployment.",
       };
     }
 

@@ -24,6 +24,7 @@ import {
   AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useState, useCallback } from "react";
+import { planNewChat, emitNewChat } from "@/lib/new-chat";
 
 interface Conversation {
   id: number;
@@ -135,7 +136,12 @@ export default function Sidebar() {
   });
 
   const handleNewChat = () => {
-    navigate("/");
+    const { navigateHome } = planNewChat(location);
+    // Always reset the (always-mounted) ChatPage, even when the route doesn't
+    // change. Navigating to "/" alone is a no-op when we're already there, which
+    // is why + appeared dead with no chat selected.
+    if (navigateHome) navigate("/");
+    emitNewChat();
   };
 
   const handleDeleteConversation = async (id: number, e: React.MouseEvent) => {

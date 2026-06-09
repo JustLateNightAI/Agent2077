@@ -9,9 +9,6 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useAgentName } from "@/lib/useAgentName";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +16,11 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { ActivityRail } from "@/components/ActivityRail";
+import { useChatStream } from "@/hooks/use-chat-stream";
+import { MarkdownMessage } from "@/components/chat-markdown";
+import { ChatMessageBubble } from "@/components/ChatMessageBubble";
+import type { ChatStreamEvent } from "@shared/chat-events";
 
 // ── Pixel-based drag handle (same pattern as workspace.tsx) ──────────────────
 function DragHandle({ onDragStart, onDrag }: { onDragStart: () => void; onDrag: (delta: number) => void }) {
@@ -47,7 +49,7 @@ function DragHandle({ onDragStart, onDrag }: { onDragStart: () => void; onDrag: 
 }
 import {
   Bot, User, Send, Square, Copy, Check, Loader2,
-  Play, RefreshCw, Plus, PlusCircle, ExternalLink, ExternalLinkCircle, ImagePlus, X,
+  Play, RefreshCw, Plus, PlusCircle, ExternalLink, ImagePlus, X,
   FolderOpen, FileText, Server, CheckCircle2,
   XCircle, Clock, Terminal, Code2, Wrench,
   ChevronRight, ChevronDown, Activity, Download, Shield,
@@ -124,11 +126,6 @@ interface Message {
   content: string;
   images?: string;
   createdAt: string;
-}
-
-interface StreamEvent {
-  type: string;
-  [key: string]: any;
 }
 
 // ── Status Badge ──────────────────────────────────────────────────────────────
@@ -220,98 +217,6 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
         )}
       </div>
     </div>
-  );
-}
-
-// ── Inline image path detection for ComfyUI-generated images ───────────────
-const IMAGE_PATH_REGEX = /(\/(?:home|root)\/[^\s]*\/agent2077-images\/[^\s]+\.(?:png|jpg|jpeg|webp|gif))/gi;
-
-function imagePathToUrl(filePath: string): string {
-  return `/api/images/file?path=${encodeURIComponent(filePath)}`;
-}
-
-function MessageContentWithImages({
-  content,
-  onImageClick,
-}: {
-  content: string;
-  onImageClick?: (src: string, alt: string) => void;
-}) {
-  const parts = content.split(IMAGE_PATH_REGEX);
-  if (parts.length === 1) return null;
-
-  // Only render <img> tags — text is rendered separately by ReactMarkdown
-  const images = parts.filter((part) => {
-    IMAGE_PATH_REGEX.lastIndex = 0;
-    return IMAGE_PATH_REGEX.test(part);
-  });
-
-  if (images.length === 0) return null;
-
-  return (
-    <div className="space-y-2">
-      {images.map((imgPath, i) => {
-        IMAGE_PATH_REGEX.lastIndex = 0;
-        const url = imagePathToUrl(imgPath);
-        const filename = imgPath.split("/").pop() || "image.png";
-        return (
-          <div key={i} className="my-2">
-            <img
-              src={url}
-              alt={filename}
-              className="max-w-xs max-h-64 rounded-lg border border-border/40 cursor-pointer hover:opacity-90 transition-opacity shadow-lg"
-              onClick={() => onImageClick?.(url, filename)}
-              loading="lazy"
-              data-testid={`inline-image-${i}`}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ── Markdown renderer (shared with main chat) ─────────────────────────────────
-
-function MarkdownMessage({ content, onImageClick }: { content: string; onImageClick?: (src: string, alt: string) => void }) {
-  return (
-    <>
-      <MessageContentWithImages content={content} onImageClick={onImageClick} />
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        className="prose prose-invert prose-sm max-w-none text-foreground break-words"
-        components={{
-          code({ node, className, children, ...props }: any) {
-            const inline = !className;
-            if (inline) {
-              return (
-                <code
-                  className="bg-muted/60 px-1 py-0.5 rounded text-xs font-mono text-primary"
-                  {...props}
-                >
-                  {children}
-                </code>
-              );
-            }
-            return (
-              <code className={`${className ?? ""} text-xs`} {...props}>
-                {children}
-              </code>
-            );
-          },
-          pre({ children }: any) {
-            return (
-              <pre className="bg-black/50 border border-border/40 rounded-md p-3 overflow-x-auto text-xs my-2">
-                {children}
-              </pre>
-            );
-          },
-        }}
-      >
-        {content.replace(IMAGE_PATH_REGEX, "").trim()}
-      </ReactMarkdown>
-    </>
   );
 }
 
@@ -1206,16 +1111,42 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
   const [nudgeInput, setNudgeInput] = useState("");
   const [activeSubAgents, setActiveSubAgents] = useState<Map<number, { title: string; color: string; status: string }>>(new Map());
   const [nudgeSent, setNudgeSent] = useState(false);
-  const [streaming, setStreaming] = useState(false);
-  const [streamContent, setStreamContent] = useState("");
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
-  const [steps, setSteps] = useState<any[]>([]);
-  const [statusLog, setStatusLog] = useState<Array<{ message: string; detail?: string; timestamp: number }>>([]);
   const [attachedImages, setAttachedImages] = useState<File[]>([]);
   const [pendingImages, setPendingImages] = useState<Array<{ name: string; base64: string; mimeType: string }>>([]);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
+
+  // Centralized SSE stream state (messages/ActivityRail/tool events). Self-dev's
+  // bespoke mount-reconnect + after-reset paths drive the same state via the
+  // exposed setters so there is one source of truth feeding ActivityRail.
+  const stream = useChatStream({
+    onEvent: (event) => {
+      if (event.type === "subtask_progress") {
+        const AGENT_COLORS = ["bg-blue-500", "bg-green-500", "bg-purple-500", "bg-orange-500", "bg-red-500"];
+        const e = event as Extract<ChatStreamEvent, { type: "subtask_progress" }>;
+        setActiveSubAgents(prev => {
+          const next = new Map(prev);
+          if (e.status === "running") {
+            const colorIdx = (e.specIndex ?? 0) % AGENT_COLORS.length;
+            next.set(e.subtaskId, { title: e.title ?? "", color: AGENT_COLORS[colorIdx], status: "running" });
+          } else {
+            next.delete(e.subtaskId);
+          }
+          return next;
+        });
+      } else if (event.type === "done" || event.type === "stream_end") {
+        setActiveSubAgents(new Map());
+      }
+    },
+  });
+  const {
+    streaming, streamContent, statusLog, steps, planSteps,
+    requestIdRef,
+    setStreaming, setStreamContent, setSteps, setPlanSteps, setStatusLog,
+  } = stream;
+  // Abort controller for the bespoke reconnect/after-reset SSE subscriptions
+  // (the hook owns a separate internal controller for the primary send path).
   const abortRef = useRef<AbortController | null>(null);
-  const requestIdRef = useRef<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -1257,6 +1188,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
         setStreaming(true);
         setStreamContent("");
         setSteps([]);
+        setPlanSteps([]);
         setStatusLog([]);
 
         fetch(`/api/conversations/${convId}/stream`, {
@@ -1281,11 +1213,17 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
                 const ev = JSON.parse(line);
                 if (ev.type === "request_id") { requestIdRef.current = ev.requestId; }
                 else if (ev.type === "chunk") { setStreamContent(p => p + (ev.content ?? "")); gotContent = true; }
-                else if (ev.type === "status") { setStatusLog(p => [...p, ev]); }
+                else if (ev.type === "status") {
+                  setStatusLog(p => [...p, { message: ev.message || ev.content || ev.label || "", detail: ev.detail, timestamp: ev.timestamp || Date.now() }]);
+                }
                 else if (ev.type === "step") { setSteps(p => [...p, ev]); }
+                else if (ev.type === "plan" && Array.isArray(ev.steps)) {
+                  setPlanSteps(ev.steps.map((s: any, i: number) => ({ step: s.step ?? i + 1, title: s.title ?? String(s), status: s.status ?? "pending" })));
+                }
                 else if (ev.type === "active") { /* already streaming */ }
                 else if (ev.type === "done" || ev.type === "error" || ev.type === "stream_end") {
                   if (ev.type === "error") setStreamContent(p => p + `\n\n[Error: ${ev.content}]`);
+                  setPlanSteps(prev => prev.map(s => ({ ...s, status: "completed" as const })));
                   setStreaming(false);
                   queryClient.invalidateQueries({ queryKey: ["/api/self-dev/conversation"] });
                   refetch();
@@ -1361,10 +1299,11 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
     setStreaming(true);
     setStreamContent("");
     setSteps([]);
-    setStatusLog([{ type: "status", content: "Resuming after reset decision..." }]);
+    setPlanSteps([]);
+    setStatusLog([{ message: "Resuming after reset decision...", timestamp: Date.now() }]);
     // Re-subscribe to SSE broadcast so we receive the new agent turn
     // The server will send a request_id event followed by the usual stream
-    const selfDevConvId = String(convData?.id ?? "");
+    const selfDevConvId = String(convData?.conversationId ?? "");
     if (!selfDevConvId) return;
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -1389,9 +1328,13 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
             const ev = JSON.parse(line);
             if (ev.type === "request_id") requestIdRef.current = ev.requestId;
             else if (ev.type === "chunk") setStreamContent(p => p + (ev.content ?? ""));
-            else if (ev.type === "status") setStatusLog(p => [...p, ev]);
+            else if (ev.type === "status") setStatusLog(p => [...p, { message: ev.message || ev.content || ev.label || "", detail: ev.detail, timestamp: ev.timestamp || Date.now() }]);
             else if (ev.type === "step") setSteps(p => [...p, ev]);
+            else if (ev.type === "plan" && Array.isArray(ev.steps)) {
+              setPlanSteps(ev.steps.map((s: any, i: number) => ({ step: s.step ?? i + 1, title: s.title ?? String(s), status: s.status ?? "pending" })));
+            }
             else if (ev.type === "done" || ev.type === "error") {
+              setPlanSteps(prev => prev.map(s => ({ ...s, status: "completed" as const })));
               setStreaming(false);
               if (ev.type === "error") setStreamContent(p => p + `\n\n[Error: ${ev.content}]`);
               queryClient.invalidateQueries({ queryKey: ["/api/self-dev/conversation"] });
@@ -1458,6 +1401,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
       setStreaming(false);
       setStreamContent("");
       setSteps([]);
+      setPlanSteps([]);
       setStatusLog([]);
       setInput("");
       setAttachedImages([]);
@@ -1469,25 +1413,23 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
   });
 
   const stopStreaming = () => {
-    if (requestIdRef.current) {
-      apiRequest("POST", "/api/chat/stop", { requestId: requestIdRef.current });
-    }
     abortRef.current?.abort();
-    setStreaming(false);
+    stream.stop();
   };
 
   const handleSend = useCallback(async (overrideMessage?: string) => {
-    const msg = overrideMessage ?? input.trim();
-    if (!msg || streaming) return;
+    const typed = overrideMessage ?? input.trim();
+    // Allow sending an image with no text (matches the Send button's enabled
+    // state). Server requires a non-empty message, so caption attachment-only sends.
+    const hasAttachment = attachedImages.length > 0;
+    if ((!typed && !hasAttachment) || streaming) return;
+    const msg = typed || "(image attached)";
 
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
-    setStreaming(true);
-    setStreamContent("");
-    setSteps([]);
-    setStatusLog([]);
+    stream.reset();
+    setActiveSubAgents(new Map());
     setPendingUserMessage(msg);
-    requestIdRef.current = "";
 
     // Convert images to base64
     const imageData: Array<{ name: string; base64: string; mimeType: string }> = [];
@@ -1502,98 +1444,19 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
     setPendingImages(imageData);
     setAttachedImages([]);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    await stream.start({
+      url: "/api/self-dev/chat",
+      body: {
+        message: msg,
+        images: imageData.length > 0 ? imageData : undefined,
+      },
+    });
 
-    try {
-      const res = await fetch("/api/self-dev/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          message: msg,
-          images: imageData.length > 0 ? imageData : undefined,
-        }),
-        signal: controller.signal,
-      });
-
-      const reader = res.body?.getReader();
-      if (!reader) return;
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let content = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event: StreamEvent = JSON.parse(line.slice(6));
-            switch (event.type) {
-              case "request_id":
-                requestIdRef.current = event.requestId;
-                break;
-              case "content":
-                content += event.content;
-                setStreamContent(content);
-                break;
-              case "status": {
-                const entry = { message: event.message || event.label || "", detail: event.detail, timestamp: event.timestamp || Date.now() };
-                setStatusLog(prev => {
-                  const next = [...prev, entry];
-                  return next.length > 20 ? next.slice(-20) : next;
-                });
-                break;
-              }
-              case "step":
-                setSteps((prev) => [...prev, event]);
-                break;
-              case "error":
-                content += `\n\n**Error:** ${event.content}`;
-                setStreamContent(content);
-                break;
-              case "subtask_progress": {
-                const AGENT_COLORS = ["bg-blue-500", "bg-green-500", "bg-purple-500", "bg-orange-500", "bg-red-500"];
-                setActiveSubAgents(prev => {
-                  const next = new Map(prev);
-                  if (event.status === "running") {
-                    const colorIdx = (event.specIndex ?? 0) % AGENT_COLORS.length;
-                    next.set(event.subtaskId, { title: event.title, color: AGENT_COLORS[colorIdx], status: "running" });
-                  } else {
-                    next.delete(event.subtaskId);
-                  }
-                  return next;
-                });
-                break;
-              }
-              case "done":
-                setActiveSubAgents(new Map());
-                setStatusLog([]);
-                break;
-            }
-          } catch {}
-        }
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setStreamContent((prev) => prev + `\n\n**Error:** ${err.message}`);
-      }
-    } finally {
-      setStreaming(false);
-      setPendingUserMessage(null);
-      setPendingImages([]);
-      abortRef.current = null;
-      refetch();
-      queryClient.invalidateQueries({ queryKey: ["/api/self-dev/conversation"] });
-    }
-  }, [input, streaming, attachedImages, refetch]);
+    setPendingUserMessage(null);
+    setPendingImages([]);
+    refetch();
+    queryClient.invalidateQueries({ queryKey: ["/api/self-dev/conversation"] });
+  }, [input, streaming, attachedImages, refetch, stream]);
 
   const handleNudge = useCallback(async () => {
     const msg = nudgeInput.trim();
@@ -1773,7 +1636,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
         )}
 
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} onImageClick={(src, alt) => setLightboxImage({ src, alt })} />
+          <ChatMessageBubble key={msg.id} message={msg} onImageClick={(src, alt) => setLightboxImage({ src, alt })} />
         ))}
 
         {/* Pending user message while streaming */}
@@ -1792,7 +1655,7 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
                   ))}
                 </div>
               )}
-              <p className="text-sm text-foreground/90 whitespace-pre-wrap">{pendingUserMessage}</p>
+              <p className="text-sm text-foreground/90 whitespace-pre-wrap text-left">{pendingUserMessage}</p>
             </div>
             <div className="w-6 h-6 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 mt-0.5">
               <User className="w-3 h-3 text-primary" />
@@ -1801,14 +1664,19 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
         )}
 
         {/* Streaming assistant response */}
-        {(streaming || statusLog.length > 0) && (streamContent || steps.length > 0 || statusLog.length > 0) && (
+        {(streaming || statusLog.length > 0) && (streamContent || steps.length > 0 || statusLog.length > 0 || planSteps.length > 0) && (
           <div className="flex gap-2.5">
             <div className="w-6 h-6 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 mt-0.5">
               <Bot className="w-3 h-3 text-primary" />
             </div>
             <div className="flex-1 min-w-0">
-              {statusLog.length > 0 && (
-                <ActivityFeed entries={statusLog} />
+              {(statusLog.length > 0 || planSteps.length > 0) && (
+                <ActivityRail
+                  statusLog={statusLog}
+                  steps={steps}
+                  planSteps={planSteps}
+                  streaming={streaming}
+                />
               )}
               {streamContent && (
                 <div className="bg-muted/30 border border-border/30 rounded-xl rounded-tl-sm px-3 py-2">
@@ -1956,128 +1824,6 @@ function ChatPanel({ statusEvents }: { statusEvents?: Array<{ message: string; d
   );
 }
 
-// ── Message Bubble ────────────────────────────────────────────────────────────
-
-function MessageBubble({ message, onImageClick }: { message: Message; onImageClick?: (src: string, alt: string) => void }) {
-  const [copied, setCopied] = useState(false);
-  const isUser = message.role === "user";
-
-  const copy = () => {
-    navigator.clipboard.writeText(message.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-
-  let parsedImages: Array<{ name: string; base64: string; mimeType: string }> = [];
-  if (message.images) {
-    try {
-      parsedImages = JSON.parse(message.images);
-    } catch {}
-  }
-
-  return (
-    <div className={`flex gap-2.5 group ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-      {/* Avatar */}
-      <div
-        className={`w-6 h-6 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
-          isUser
-            ? "bg-primary/20 border-primary/30"
-            : "bg-cyan-500/10 border-cyan-500/20"
-        }`}
-      >
-        {isUser ? (
-          <User className="w-3 h-3 text-primary" />
-        ) : (
-          <Bot className="w-3 h-3 text-cyan-400" />
-        )}
-      </div>
-
-      {/* Content */}
-      <div className={`flex-1 min-w-0 ${isUser ? "items-end" : "items-start"} flex flex-col`}>
-        {parsedImages.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2">
-            {parsedImages.map((img, i) => (
-              <img
-                key={i}
-                src={img.base64}
-                alt={img.name}
-                className="w-24 h-24 object-cover rounded-lg border border-border/30"
-              />
-            ))}
-          </div>
-        )}
-        <div
-          className={`relative max-w-[90%] rounded-xl px-3 py-2 ${
-            isUser
-              ? "bg-primary/10 border border-primary/20 rounded-tr-sm"
-              : "bg-muted/30 border border-border/30 rounded-tl-sm"
-          }`}
-        >
-          {isUser ? (
-            <p className="text-sm text-foreground/90 whitespace-pre-wrap">{message.content}</p>
-          ) : (
-            <MarkdownMessage content={message.content} onImageClick={onImageClick} />
-          )}
-          <button
-            className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
-            onClick={copy}
-          >
-            {copied ? (
-              <Check className="w-3 h-3 text-green-400" />
-            ) : (
-              <Copy className="w-3 h-3 text-muted-foreground hover:text-foreground" />
-            )}
-          </button>
-        </div>
-        <span className="text-[9px] text-muted-foreground/50 mt-0.5 px-1 font-mono">
-          {new Date(message.createdAt).toLocaleTimeString()}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ── Activity Feed Component (mirrors chat.tsx) ─────────────────────────────
-function ActivityFeed({ entries }: { entries: Array<{ message: string; detail?: string; timestamp: number }> }) {
-  const feedRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: "smooth" });
-  }, [entries.length]);
-  const visible = entries.slice(-8);
-  return (
-    <div className="bg-card/80 border border-border rounded-lg p-3 mb-2">
-      <div className="flex items-center gap-2 mb-2">
-        <Activity className="w-4 h-4 text-primary animate-pulse" />
-        <span className="text-xs font-medium text-foreground">Working</span>
-      </div>
-      <div ref={feedRef} className="space-y-1 max-h-32 overflow-y-auto">
-        {visible.map((entry, i) => {
-          const isLatest = i === visible.length - 1;
-          return (
-            <div
-              key={`${entry.timestamp}-${i}`}
-              className={`flex items-center gap-2 text-[11px] transition-opacity duration-300 ${
-                isLatest ? "text-foreground" : "text-muted-foreground/60"
-              }`}
-            >
-              {isLatest ? (
-                <Loader2 className="w-3 h-3 animate-spin text-primary shrink-0" />
-              ) : (
-                <CheckCircle2 className="w-3 h-3 text-green-400/60 shrink-0" />
-              )}
-              <span className={isLatest ? "font-medium" : ""}>{entry.message}</span>
-              {entry.detail && (
-                <span className="text-[10px] text-muted-foreground/50 truncate">
-                  {entry.detail}
-                </span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
 
 // ── Main Page Component ───────────────────────────────────────────────────────
 

@@ -187,6 +187,21 @@ export const messageStore = {
       .where(and(eq(s.messages.conversationId, conversationId), gt(s.messages.id, afterId)))
       .run();
   },
+  // Clear an entire conversation's chat history without deleting the
+  // conversation record itself. Preserves the conversation's systemPrompt
+  // (project mode custom prompt/context) and any owning project. Also drops
+  // transient task plans/subtasks tied to the conversation so a fresh chat
+  // starts with no stale run state.
+  clearForConversation(conversationId: number): void {
+    db.delete(s.subtasks).where(
+      inArray(s.subtasks.planId,
+        db.select({ id: s.taskPlans.id }).from(s.taskPlans).where(eq(s.taskPlans.conversationId, conversationId))
+      )
+    ).run();
+    db.delete(s.taskPlans).where(eq(s.taskPlans.conversationId, conversationId)).run();
+    db.delete(s.messages).where(eq(s.messages.conversationId, conversationId)).run();
+    db.update(s.conversations).set({ updatedAt: new Date().toISOString() }).where(eq(s.conversations.id, conversationId)).run();
+  },
 };
 
 // ── Task Plans ──────────────────────────────────────────────────────

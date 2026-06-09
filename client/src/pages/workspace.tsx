@@ -2,15 +2,16 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
+import { useChatStream } from "@/hooks/use-chat-stream";
+import { ChatMessageBubble } from "@/components/ChatMessageBubble";
+import type { ChatStreamEvent } from "@shared/chat-events";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card } from "@/components/ui/card";
+import { ActivityRail } from "@/components/ActivityRail";
 // CodeMirror 6
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
@@ -1056,54 +1057,6 @@ function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClos
   );
 }
 
-// ── Inline image path detection for ComfyUI-generated images ───────────────
-const IMAGE_PATH_REGEX = /(\/(?:home|root)\/[^\s]*\/agent2077-images\/[^\s]+\.(?:png|jpg|jpeg|webp|gif))/gi;
-
-function imagePathToUrl(filePath: string): string {
-  return `/api/images/file?path=${encodeURIComponent(filePath)}`;
-}
-
-function MessageContentWithImages({
-  content,
-  onImageClick,
-}: {
-  content: string;
-  onImageClick?: (src: string, alt: string) => void;
-}) {
-  const parts = content.split(IMAGE_PATH_REGEX);
-  if (parts.length === 1) return null;
-
-  // Only render <img> tags — text is rendered separately by ReactMarkdown
-  const images = parts.filter((part) => {
-    IMAGE_PATH_REGEX.lastIndex = 0;
-    return IMAGE_PATH_REGEX.test(part);
-  });
-
-  if (images.length === 0) return null;
-
-  return (
-    <div className="space-y-2">
-      {images.map((imgPath, i) => {
-        IMAGE_PATH_REGEX.lastIndex = 0;
-        const url = imagePathToUrl(imgPath);
-        const filename = imgPath.split("/").pop() || "image.png";
-        return (
-          <div key={i} className="my-2">
-            <img
-              src={url}
-              alt={filename}
-              className="max-w-xs max-h-64 rounded-lg border border-border/40 cursor-pointer hover:opacity-90 transition-opacity shadow-lg"
-              onClick={() => onImageClick?.(url, filename)}
-              loading="lazy"
-              data-testid={`inline-image-${i}`}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function WorkspaceChat({
   project,
   activeFile,
@@ -1115,15 +1068,12 @@ function WorkspaceChat({
   onFilesChanged: () => void;
   onStreamingChange?: (streaming: boolean) => void;
 }) {
+  const { toast } = useToast();
   const conversationId = project.conversationId ?? null;
   const [input, setInput] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [streamContent, setStreamContent] = useState("");
-  const [steps, setSteps] = useState<any[]>([]);
-  const [planSteps, setPlanSteps] = useState<WsPlanStep[]>([]);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [routingInfo, setRoutingInfo] = useState<any>(null);
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
-  const [statusLog, setStatusLog] = useState<Array<{ message: string; detail?: string; timestamp: number }>>([]);
   const [nudgeInput, setNudgeInput] = useState("");
   const [nudgeSent, setNudgeSent] = useState(false);
   const [currentConvId, setCurrentConvId] = useState<number | null>(conversationId);
@@ -1156,18 +1106,47 @@ function WorkspaceChat({
     return Array.from(seen.values());
   }, [allModels]);
   const activeReasoningLabel = reasoningModes.find(r => r.id === reasoningModeId)?.label;
-  // Confirmation banner + diff preview state (must live in this component — used in SSE handler)
-  const [pendingConfirm, setPendingConfirm] = useState<{
-    id: string;
-    tool: string;
-    args?: Record<string, any>;
-    reason: string;
-    resolve: (approved: boolean) => void;
-  } | null>(null);
-  const [diffPreviews, setDiffPreviews] = useState<DiffPreview[]>([]);
-  const [activeDiff, setActiveDiff] = useState<DiffPreview | null>(null);
+
+  // Shared SSE stream hook — owns streaming/content/status/steps/plan/confirm/diff.
+  const stream = useChatStream({
+    onEvent: (event: ChatStreamEvent) => {
+      switch (event.type) {
+        case "conversation":
+          setCurrentConvId((event as any).id);
+          break;
+        case "routing":
+          setRoutingInfo(event);
+          break;
+        case "files_changed":
+          onFilesChanged();
+          break;
+        case "done":
+        case "stream_end":
+          onFilesChanged();
+          break;
+      }
+    },
+  });
+  const {
+    streaming,
+    streamContent,
+    statusLog,
+    steps,
+    planSteps,
+    pendingConfirm,
+    activeDiff,
+    requestIdRef,
+    setActiveDiff,
+    setStreaming,
+    setStreamContent,
+    setSteps,
+    setPlanSteps,
+    setStatusLog,
+    setPendingConfirm,
+    respondConfirm,
+  } = stream;
+  // Separate abort controller for the bespoke reconnect EventSource path.
   const abortRef = useRef<AbortController | null>(null);
-  const requestIdRef = useRef<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1204,14 +1183,29 @@ function WorkspaceChat({
     const newId = project.conversationId ?? null;
     if (newId !== currentConvId) {
       setCurrentConvId(newId);
-      setStreamContent("");
-      setSteps([]);
-      setPlanSteps([]);
+      stream.reset();
       setRoutingInfo(null);
       setPendingUserMessage(null);
-      setStatusLog([]);
     }
   }, [project.id]);
+
+  // Clear chat: wipes this project's chat history while keeping the project,
+  // its conversation, and project mode prompt/context intact.
+  const clearChat = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/projects/${project.id}/chat/clear`);
+      return res.json();
+    },
+    onSuccess: () => {
+      stream.reset();
+      setRoutingInfo(null);
+      setPendingUserMessage(null);
+      if (convId) queryClient.invalidateQueries({ queryKey: ["/api/conversations", convId, "messages"] });
+      setShowClearConfirm(false);
+      toast({ title: "Chat cleared", description: "Started a fresh chat for this project." });
+    },
+    onError: () => toast({ title: "Could not clear chat", variant: "destructive" }),
+  });
 
   // Notify parent of streaming state changes
   useEffect(() => {
@@ -1290,20 +1284,27 @@ function WorkspaceChat({
                   onFilesChanged();
                   break;
                 case "confirmation_needed": {
-                  const confirmId2 = data.id;
                   setPendingConfirm({
-                    id: confirmId2,
+                    id: data.id,
                     tool: data.tool,
                     args: data.args,
                     reason: data.reason,
-                    resolve: (approved: boolean) => {
-                      fetch("/api/chat/confirm", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        credentials: "include", body: JSON.stringify({ confirmId: confirmId2, approved }),
-                      }).catch(() => {});
-                      if (!approved) setStreamContent(prev => prev + "\n\n*Operation declined.*");
-                    },
+                    resolve: stream.makeConfirmResolver(data.id, () =>
+                      stream.appendContent("\n\n*Operation declined.*"),
+                    ),
                   });
+                  break;
+                }
+                case "diff_preview": {
+                  if (data.editId && data.filePath) {
+                    setActiveDiff({
+                      editId: data.editId,
+                      filePath: data.filePath,
+                      description: data.description,
+                      original: data.original || "",
+                      proposed: data.proposed || "",
+                    });
+                  }
                   break;
                 }
                 case "error":
@@ -1357,18 +1358,18 @@ function WorkspaceChat({
   }, [steps.length]);
 
   const handleSend = useCallback(async (overrideMessage?: string) => {
-    const msg = overrideMessage || input.trim();
-    if (!msg || streaming) return;
+    const typed = overrideMessage || input.trim();
+    // Allow sending with no text when an image/file is attached (matches the
+    // Send button's enabled state). Server requires a non-empty message, so
+    // fall back to a short caption describing the attachment.
+    const hasAttachment = attachedImages.length > 0 || attachedFiles.length > 0;
+    if ((!typed && !hasAttachment) || streaming) return;
+    const msg = typed || (attachedImages.length > 0 ? "(image attached)" : "(file attached)");
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
-    setStreaming(true);
-    setStreamContent("");
-    setSteps([]);
-    setPlanSteps([]);
+    stream.reset();
     setRoutingInfo(null);
     setPendingUserMessage(msg);
-    setStatusLog([]);
-    requestIdRef.current = "";
 
     // Convert attached images to base64
     const imageData: Array<{name: string, base64: string, mimeType: string}> = [];
@@ -1382,9 +1383,6 @@ function WorkspaceChat({
     }
     setPendingImages(imageData);
     setAttachedImages([]);
-
-    const controller = new AbortController();
-    abortRef.current = controller;
 
     try {
       // Build project-scoped system prompt — MUST reference project tools, not workspace tools
@@ -1406,11 +1404,9 @@ function WorkspaceChat({
         `- File paths in write_project_file/read_project_file should be RELATIVE to the project root (e.g. "index.html", "src/app.js"), NOT absolute paths.\n` +
         (activeFile ? `\nThe user currently has this file open: ${activeFile}` : "");
 
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
+      await stream.start({
+        url: "/api/chat",
+        body: {
           conversationId: convId,
           message: msg,
           systemPrompt,
@@ -1418,143 +1414,19 @@ function WorkspaceChat({
           reasoningModeLabel: activeReasoningLabel || undefined,
           images: imageData.length > 0 ? imageData : undefined,
           attachments: attachedFiles.length > 0 ? attachedFiles : undefined,
-        }),
-        signal: controller.signal,
+        },
       });
-
-      const reader = res.body?.getReader();
-      if (!reader) return;
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let content = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            switch (event.type) {
-              case "request_id":
-                requestIdRef.current = event.requestId;
-                break;
-              case "conversation":
-                setCurrentConvId(event.id);
-                break;
-              case "routing":
-                setRoutingInfo(event);
-                break;
-              case "content":
-                content += event.content;
-                setStreamContent(content);
-                break;
-              case "step":
-                setSteps(prev => [...prev, event]);
-                break;
-              case "plan":
-                if (event.steps && Array.isArray(event.steps)) {
-                  setPlanSteps(event.steps.map((s: any) => ({
-                    step: s.step,
-                    title: s.title,
-                    status: "pending" as const,
-                  })));
-                }
-                break;
-              case "status":
-                setStatusLog(prev => {
-                  const entry = { message: event.message, detail: event.detail, timestamp: event.timestamp || Date.now() };
-                  const next = [...prev, entry];
-                  return next.length > 20 ? next.slice(-20) : next;
-                });
-                break;
-              case "system_notice":
-                setStatusLog(prev => {
-                  const entry = { message: event.content || "Note", timestamp: Date.now() };
-                  const next = [...prev, entry];
-                  return next.length > 20 ? next.slice(-20) : next;
-                });
-                break;
-              case "confirmation_needed": {
-                // Use the ConfirmBanner (same pattern as chat.tsx — no window.confirm)
-                const confirmId = event.id;
-                setPendingConfirm({
-                  id: confirmId,
-                  tool: event.tool,
-                  args: event.args,
-                  reason: event.reason,
-                  resolve: (approved: boolean) => {
-                    fetch("/api/chat/confirm", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      credentials: "include",
-                      body: JSON.stringify({ confirmId, approved }),
-                    }).catch(() => {});
-                    if (!approved) { content += "\n\n*Operation declined.*"; setStreamContent(content); }
-                  },
-                });
-                break;
-              }
-              case "diff_preview": {
-                if (event.editId && event.filePath) {
-                  const newDiff: DiffPreview = {
-                    editId: event.editId,
-                    filePath: event.filePath,
-                    description: event.description,
-                    original: event.original || "",
-                    proposed: event.proposed || "",
-                  };
-                  setDiffPreviews(prev => [...prev, newDiff]);
-                  setActiveDiff(newDiff);
-                }
-                break;
-              }
-              case "error":
-                content += `\n\n**Error:** ${event.content}`;
-                setStreamContent(content);
-                break;
-              case "files_changed":
-                onFilesChanged();
-                break;
-              case "done":
-                setPlanSteps(prev => prev.map(s => ({ ...s, status: "completed" as const })));
-                // Refresh file tree in case agent created files
-                onFilesChanged();
-                break;
-            }
-          } catch {}
-        }
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setStreamContent(prev => prev + `\n\n**Error:** ${err.message}`);
-      }
     } finally {
-      setStreaming(false);
       setPendingUserMessage(null);
       setPendingImages([]);
       setAttachedFiles([]);
-      abortRef.current = null;
       refetch();
     }
   }, [input, streaming, convId, project, activeFile, refetch, onFilesChanged, attachedImages, attachedFiles, reasoningModeId, activeReasoningLabel]);
 
   const handleStop = () => {
-    if (requestIdRef.current) {
-      fetch("/api/chat/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ requestId: requestIdRef.current }),
-      }).catch(() => {});
-    }
     abortRef.current?.abort();
-    setStatusLog(prev => [...prev, { message: "Stopped", timestamp: Date.now() }]);
+    stream.stop();
   };
 
   const handleNudge = useCallback(async () => {
@@ -1631,7 +1503,46 @@ function WorkspaceChat({
             {routingInfo.model?.split("/").pop()}
           </Badge>
         )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className={`h-6 w-6 text-muted-foreground hover:text-destructive ${routingInfo ? "" : "ml-auto"}`}
+          title={streaming ? "Stop the running chat before clearing" : "Clear chat"}
+          disabled={streaming || !convId || messages.length === 0}
+          onClick={() => setShowClearConfirm(true)}
+          data-testid="clear-chat-button"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </Button>
       </div>
+
+      {/* Clear chat confirmation */}
+      <Dialog open={showClearConfirm} onOpenChange={setShowClearConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Clear chat?</DialogTitle>
+            <DialogDescription>
+              This permanently deletes the chat history for "{project.name}". Your project files,
+              specs, memory, and settings are kept, and you can keep chatting in the same project
+              afterwards. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowClearConfirm(false)} disabled={clearChat.isPending}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => clearChat.mutate()}
+              disabled={clearChat.isPending}
+              data-testid="confirm-clear-chat"
+            >
+              {clearChat.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Trash2 className="w-4 h-4 mr-1" />}
+              Clear chat
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Tool steps bar */}
       {steps.length > 0 && (
@@ -1661,68 +1572,35 @@ function WorkspaceChat({
       >
         <div className="space-y-3">
           {displayMessages.map(msg => (
-            <WsChatBubble
+            <ChatMessageBubble
               key={msg.id}
+              variant="compact"
               message={msg}
               onImageClick={(src, alt) => setLightboxImage({ src, alt })}
             />
           ))}
 
           {pendingUserMessage && (
-            <WsChatBubble
+            <ChatMessageBubble
+              variant="compact"
               message={{ id: -2, role: "user", content: pendingUserMessage, createdAt: new Date().toISOString() }}
               pendingImages={pendingImages}
               onImageClick={(src, alt) => setLightboxImage({ src, alt })}
             />
           )}
 
-          {/* Plan progress */}
-          {streaming && planSteps.length > 0 && (
-            <div className="bg-card/80 border border-border rounded-lg p-2 text-[10px]" data-testid="ws-plan-progress">
-              <div className="flex items-center gap-1.5 mb-1.5">
-                <ListChecks className="w-3.5 h-3.5 text-primary" />
-                <span className="font-medium">Plan</span>
-                <span className="text-muted-foreground ml-auto">
-                  {planSteps.filter(s => s.status === "completed").length}/{planSteps.length}
-                </span>
-              </div>
-              {planSteps.map((step, i) => {
-                const StepIcon = step.status === "completed" ? CheckCircle2 : step.status === "running" ? CircleDot : Circle;
-                const color = step.status === "completed" ? "text-green-400" : step.status === "running" ? "text-primary animate-pulse" : "text-muted-foreground/50";
-                return (
-                  <div key={i} className="flex items-center gap-1.5 py-0.5">
-                    <StepIcon className={`w-3 h-3 shrink-0 ${color}`} />
-                    <span className={step.status === "completed" ? "text-muted-foreground line-through" : step.status === "running" ? "font-medium" : "text-muted-foreground/70"}>
-                      {step.title}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Activity feed */}
-          {streaming && statusLog.length > 0 && (
-            <div className="bg-card/80 border border-border rounded-lg p-2 text-[10px]" data-testid="ws-activity-feed">
-              <div className="flex items-center gap-1.5 mb-1.5">
-                <Activity className="w-3.5 h-3.5 text-primary animate-pulse" />
-                <span className="font-medium">Working</span>
-              </div>
-              {statusLog.slice(-5).map((entry, i, arr) => {
-                const isLatest = i === arr.length - 1;
-                return (
-                  <div key={`${entry.timestamp}-${i}`} className={`flex items-center gap-1.5 py-0.5 ${isLatest ? "text-foreground" : "text-muted-foreground/60"}`}>
-                    {isLatest ? <Loader2 className="w-2.5 h-2.5 animate-spin text-primary shrink-0" /> : <CheckCircle2 className="w-2.5 h-2.5 text-green-400/60 shrink-0" />}
-                    <span className={isLatest ? "font-medium" : ""}>{entry.message}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          {/* Activity rail — shared with main chat & self-dev */}
+          <ActivityRail
+            statusLog={statusLog}
+            steps={steps}
+            planSteps={planSteps}
+            streaming={streaming}
+          />
 
           {/* Streaming assistant message */}
           {streaming && (
-            <WsChatBubble
+            <ChatMessageBubble
+              variant="compact"
               message={{ id: -1, role: "assistant", content: streamContent || "", createdAt: new Date().toISOString() }}
               isStreaming
               currentStatus={statusLog.length > 0 ? statusLog[statusLog.length - 1] : undefined}
@@ -1904,121 +1782,21 @@ function WorkspaceChat({
               <Square className="w-3.5 h-3.5" />
             </Button>
           ) : (
-            <Button size="icon" variant="ghost" className="h-9 w-9 shrink-0" onClick={() => handleSend()} disabled={!input.trim() && attachedImages.length === 0} data-testid="workspace-chat-send">
+            <Button size="icon" variant="ghost" className="h-9 w-9 shrink-0" onClick={() => handleSend()} disabled={!input.trim() && attachedImages.length === 0 && attachedFiles.length === 0} data-testid="workspace-chat-send">
               <Send className="w-4 h-4" />
             </Button>
           )}
         </div>
       </div>
-    </div>
-  );
-}
 
-// ── Workspace chat message bubble ────────────────────────────────────
-function WsChatBubble({
-  message,
-  isStreaming,
-  currentStatus,
-  pendingImages,
-  onImageClick,
-}: {
-  message: WsMessage;
-  isStreaming?: boolean;
-  currentStatus?: { message: string; detail?: string };
-  pendingImages?: Array<{name: string, base64: string, mimeType: string}>;
-  onImageClick?: (src: string, alt: string) => void;
-}) {
-  const isUser = message.role === "user";
-  const [copied, setCopied] = useState(false);
-
-  // Parse stored images from message (DB-stored messages have images as JSON string)
-  const storedImages: Array<{name: string, base64: string, mimeType: string}> =
-    message.images ? (() => { try { return JSON.parse(message.images!); } catch { return []; } })() : [];
-  const displayImages = isUser && message.id === -2 && pendingImages ? pendingImages : storedImages;
-
-  return (
-    <div className={`flex gap-2 ${isUser ? "justify-end" : ""}`}>
-      {!isUser && (
-        <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
-          <Bot className="w-3.5 h-3.5 text-primary" />
-        </div>
+      {/* Confirmation banner — agent requested approval for a guarded tool. */}
+      {pendingConfirm && (
+        <WorkspaceConfirmBanner confirm={pendingConfirm} onRespond={respondConfirm} />
       )}
-      <div className={`flex-1 max-w-[90%] ${isUser ? "text-right" : ""}`}>
-        <div className={`inline-block text-xs rounded-lg px-2.5 py-1.5 ${
-          isUser
-            ? "bg-primary text-primary-foreground ml-auto"
-            : "bg-card border border-border"
-        }`}>
-          {isUser ? (
-            <>
-              {displayImages.length > 0 && (
-                <div className="flex flex-wrap gap-1 mb-1">
-                  {displayImages.map((img, i) => (
-                    <img
-                      key={i}
-                      src={img.base64}
-                      className="max-w-[120px] rounded border border-border/40 cursor-pointer hover:opacity-80 transition-opacity"
-                      alt={img.name}
-                      onClick={() => onImageClick?.(img.base64, img.name)}
-                    />
-                  ))}
-                </div>
-              )}
-              <p className="whitespace-pre-wrap">{message.content}</p>
-            </>
-          ) : (
-            <div className="markdown-content">
-              {message.content ? (
-                <>
-                  <MessageContentWithImages content={message.content} onImageClick={onImageClick} />
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}
-                    components={{
-                      pre: ({ children }) => (
-                        <div className="relative group my-1">
-                          <pre className="bg-muted/50 rounded p-2 text-[11px] overflow-x-auto max-w-full whitespace-pre-wrap break-words">{children}</pre>
-                          <Button variant="ghost" size="sm"
-                            className="absolute top-0.5 right-0.5 h-5 w-5 p-0 opacity-0 group-hover:opacity-100"
-                            onClick={() => {
-                              const code = (children as any)?.props?.children;
-                              if (code) navigator.clipboard.writeText(String(code));
-                            }}>
-                            <Copy className="w-2.5 h-2.5" />
-                          </Button>
-                        </div>
-                      ),
-                    }}>
-                    {message.content.replace(IMAGE_PATH_REGEX, "").trim()}
-                  </ReactMarkdown>
-                </>
-              ) : isStreaming ? (
-                <div className="flex items-center gap-1.5 py-0.5">
-                  <Loader2 className="w-3 h-3 animate-spin text-primary" />
-                  <span className="text-[10px] text-muted-foreground">
-                    {currentStatus?.message || "Thinking..."}
-                  </span>
-                </div>
-              ) : null}
-              {isStreaming && message.content && <span className="inline-block w-1.5 h-3 bg-primary animate-pulse ml-0.5" />}
-            </div>
-          )}
-        </div>
-        {/* Copy button on hover */}
-        {!isStreaming && !isUser && message.content && (
-          <div className="opacity-0 hover:opacity-100 transition-opacity mt-0.5">
-            <Button variant="ghost" size="sm" className="h-4 px-1" onClick={() => {
-              navigator.clipboard.writeText(message.content);
-              setCopied(true);
-              setTimeout(() => setCopied(false), 2000);
-            }}>
-              {copied ? <Check className="w-2.5 h-2.5 text-green-400" /> : <Copy className="w-2.5 h-2.5" />}
-            </Button>
-          </div>
-        )}
-      </div>
-      {isUser && (
-        <div className="w-6 h-6 rounded-full bg-accent/10 flex items-center justify-center shrink-0 mt-0.5">
-          <User className="w-3.5 h-3.5 text-accent" />
-        </div>
+
+      {/* Diff preview — agent proposed a file edit. */}
+      {activeDiff && (
+        <DiffPreviewDialog diff={activeDiff} onClose={() => setActiveDiff(null)} />
       )}
     </div>
   );

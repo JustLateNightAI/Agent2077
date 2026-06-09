@@ -1462,6 +1462,20 @@ export function registerRoutes(server: http.Server, app: Express) {
     res.json({ success: true });
   });
 
+  // Clear a project's chat history (messages + transient task plans) while
+  // preserving the project, its conversation record, and the conversation's
+  // systemPrompt (project mode custom prompt/context). Project files, specs,
+  // memory, and settings are untouched.
+  app.post("/api/projects/:id/chat/clear", (req, res) => {
+    const project = projectStore.getById(parseInt(req.params.id));
+    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project.conversationId) return res.status(400).json({ error: "Project has no conversation" });
+    const conv = conversationStore.getById(project.conversationId);
+    if (!conv) return res.status(404).json({ error: "Conversation not found" });
+    messageStore.clearForConversation(project.conversationId);
+    res.json({ success: true, conversationId: project.conversationId });
+  });
+
   // ── Project file tree ─────────────────────────────────────────────
   app.get("/api/projects/:id/files", (req, res) => {
     const project = projectStore.getById(parseInt(req.params.id));

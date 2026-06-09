@@ -34,7 +34,7 @@ import { messageStore, memoryStore, skillStore, analyticsStore, settingsStore, p
 import { getMemorySnapshot } from "../tools/memory-tools.js";
 import { formatPlanForPrompt, type TaskPlan } from "./task-planner.js";
 import { selectTools, readSmartSelectionSetting, shouldIncludeAppModule, shouldIncludeSshModule, shouldIncludeDeepResearchModule } from "./tool-selector.js";
-import { routeRequest, type RouteDecision } from "./request-router.js";
+import { routeRequest, decideToolChoice, type RouteDecision } from "./request-router.js";
 import { repairToolCall } from "./tool-call-repair.js";
 import { FailureClassifier } from "./failure-classifier.js";
 import { jsonrepair } from "jsonrepair";
@@ -754,6 +754,21 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
     `reasons=[${routeDecision.reasons.slice(0, 3).join("; ")}]`
   );
 
+  // v16.75: Tool-choice gate for casual/new-chat turns. When the latest user
+  // message is small talk with no actionable intent, send the tool schemas but
+  // set tool_choice:"none" so the model replies normally instead of eagerly
+  // firing floor/task tools. Only applied to the FIRST iteration — once the
+  // agent is mid-task we always let it call tools (tool_choice:"auto"). Project
+  // mode and the Deep Research toggle keep "auto". Fixes the "agent uses tools
+  // when I'm just chatting / starting a new chat" report.
+  const firstTurnToolChoice = decideToolChoice(lastUserMessage, {
+    customPrompt: req.systemPrompt,
+    deepResearch: req.deepResearch,
+  });
+  if (firstTurnToolChoice === "none") {
+    console.log(`[AgentLoop] casual/non-actionable turn → tool_choice="none" for first iteration`);
+  }
+
   const selection = selectTools({
     allTools: getAllTools(),
     plan,
@@ -1060,6 +1075,8 @@ export async function runAgentLoop(req: AgentRequest): Promise<void> {
         conversationId,
         taskType,
         reasoning: req.reasoning ?? null,
+        // v16.75: suppress tool calls on the first iteration of a casual turn.
+        toolChoice: iteration === 1 ? firstTurnToolChoice : "auto",
       };
       const nativeTopP = getModelTopP(model);
       if (nativeTopP !== undefined) streamOptions.topP = nativeTopP;

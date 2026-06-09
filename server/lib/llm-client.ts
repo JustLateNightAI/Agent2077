@@ -407,6 +407,37 @@ export interface ToolDefinition {
   };
 }
 
+/**
+ * Decide what `tools` / `tool_choice` to put on an OpenAI-compatible request body.
+ *
+ * v16.75.1: the critical rule is that when the caller asks for toolChoice "none"
+ * (a casual / non-actionable turn) we DO NOT advertise any tools at all. Many
+ * local OpenAI-compatible servers (vLLM, llama.cpp, DeepSeek shims) ignore
+ * `tool_choice: "none"` whenever a `tools` array is present and call them
+ * anyway — the root cause of "agent fires memory_recall/session_search on a
+ * casual greeting". Omitting the schemas entirely is the only backend-agnostic
+ * guarantee. Returns `{}` (no tools, no tool_choice) in that case.
+ *
+ * Pure and side-effect free so it can be unit-tested without a network call.
+ */
+export function resolveToolAttachment(
+  tools: ToolDefinition[] | undefined,
+  supportsToolCalling: boolean,
+  modelId: string,
+  toolChoice: "auto" | "none" | "required" | undefined,
+): { tools?: ToolDefinition[]; tool_choice?: "auto" | "none" | "required" } {
+  if (!tools?.length || !supportsToolCalling) return {};
+  // Casual / non-actionable turn: suppress tools entirely.
+  if (toolChoice === "none") return {};
+
+  let outTools = tools;
+  if (isMiniMaxModel(modelId) && outTools.length > 18) {
+    console.warn(`[LLM Client] MiniMax cap: trimming tools ${outTools.length} → 18`);
+    outTools = outTools.slice(0, 18);
+  }
+  return { tools: outTools, tool_choice: toolChoice ?? "auto" };
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
@@ -488,6 +519,13 @@ export async function chatCompletion(
     conversationId?: number; // Recorded into analytics metadata for per-conversation token usage
     taskType?: string;       // Recorded into analytics for task-type distribution
     reasoning?: ReasoningProfile | null; // v16.74.5: resolved per-request thinking profile
+    // v16.75: control over the OpenAI `tool_choice` field. Default "auto".
+    // Pass "none" to send the tool schemas but forbid the model from calling
+    // any of them this turn (used for casual/chat turns so the agent answers
+    // normally instead of eagerly invoking floor tools). "required" forces a
+    // call. Tools are still attached either way so the model can self-correct
+    // on a later iteration.
+    toolChoice?: "auto" | "none" | "required";
   } = {}
 ): Promise<LLMResponse> {
   // ── OpenRouter balance floor pre-flight check ─────────────────────────────
@@ -522,14 +560,14 @@ export async function chatCompletion(
   // Add tools if model supports them and tools are provided.
   // v16.73: last-resort MiniMax cap — even with smart selection on, never send
   // more than 18 tools to MiniMax (parser spirals into infinite reasoning).
-  if (options.tools?.length && model.supportsToolCalling) {
-    let outTools = options.tools;
-    if (isMiniMaxModel(model.modelId) && outTools.length > 18) {
-      console.warn(`[LLM Client] MiniMax cap: trimming tools ${outTools.length} → 18`);
-      outTools = outTools.slice(0, 18);
-    }
-    body.tools = outTools;
-    body.tool_choice = "auto";
+  // v16.75.1: when toolChoice is "none" the tools array is omitted entirely —
+  // see resolveToolAttachment for why (local models ignore tool_choice:none).
+  const attach = resolveToolAttachment(options.tools, model.supportsToolCalling, model.modelId, options.toolChoice);
+  if (attach.tools) {
+    body.tools = attach.tools;
+    body.tool_choice = attach.tool_choice;
+  } else if (options.toolChoice === "none" && options.tools?.length) {
+    console.log(`[LLM Client] toolChoice="none" → omitting ${options.tools.length} tool schema(s) for this turn (prevents local models ignoring tool_choice:none)`);
   }
 
   // Thinking / extended reasoning mode — shaped by the resolved profile (or the
@@ -658,6 +696,9 @@ export async function* chatCompletionStream(
     conversationId?: number; // Recorded into analytics metadata for per-conversation token usage
     taskType?: string;       // Recorded into analytics for task-type distribution
     reasoning?: ReasoningProfile | null; // v16.74.5: resolved per-request thinking profile
+    // v16.75: see chatCompletion above. Default "auto"; "none" sends schemas
+    // but forbids calls (casual/chat turns).
+    toolChoice?: "auto" | "none" | "required";
   } = {}
 ): AsyncGenerator<StreamChunk> {
   // If an external abort signal is already fired, don't even start
@@ -745,15 +786,15 @@ export async function* chatCompletionStream(
     streamBody.max_tokens = options.maxTokens;
   }
 
-  if (options.tools?.length && model.supportsToolCalling) {
-    let outTools = options.tools;
-    // v16.73: last-resort MiniMax cap — see chatCompletion above for rationale.
-    if (isMiniMaxModel(model.modelId) && outTools.length > 18) {
-      console.warn(`[LLM Client] MiniMax cap (stream): trimming tools ${outTools.length} → 18`);
-      outTools = outTools.slice(0, 18);
-    }
-    streamBody.tools = outTools;
-    streamBody.tool_choice = "auto";
+  // v16.75.1: omit tools entirely when toolChoice is "none" — see
+  // resolveToolAttachment. Local OpenAI-compatible servers ignore
+  // tool_choice:"none", so the only robust suppression is to not send schemas.
+  const attachStream = resolveToolAttachment(options.tools, model.supportsToolCalling, model.modelId, options.toolChoice);
+  if (attachStream.tools) {
+    streamBody.tools = attachStream.tools;
+    streamBody.tool_choice = attachStream.tool_choice;
+  } else if (options.toolChoice === "none" && options.tools?.length) {
+    console.log(`[LLM Client] toolChoice="none" (stream) → omitting ${options.tools.length} tool schema(s) for this turn`);
   }
 
   // Thinking / extended reasoning mode — shaped by the resolved profile (or the

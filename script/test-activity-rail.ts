@@ -1,5 +1,5 @@
 /**
- * v16.74 chat activity-rail smoke test.
+ * v16.74.15 chat activity-rail smoke test.
  *
  * The ActivityRail UI maps the backend's human-readable `status` strings
  * (emitted by agent-loop.ts sendStatus()) into coarse phases so the rail can

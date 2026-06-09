@@ -33,6 +33,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ActivityRail } from "@/components/ActivityRail";
+import { useChatStream } from "@/hooks/use-chat-stream";
+import type { ChatStreamEvent } from "@shared/chat-events";
+import { IMAGE_PATH_REGEX, MessageContentWithImages } from "@/components/chat-markdown";
+import { NEW_CHAT_EVENT } from "@/lib/new-chat";
 
 interface Message {
   id: number;
@@ -58,11 +62,6 @@ interface PlanStep {
   step: number;
   title: string;
   status: "pending" | "running" | "completed";
-}
-
-interface StreamEvent {
-  type: string;
-  [key: string]: any;
 }
 
 const TASK_ICONS: Record<string, any> = {
@@ -236,55 +235,8 @@ function ContextGauge({ usage }: { usage: ContextUsageData }) {
   );
 }
 
-// ── Inline image path detection for ComfyUI-generated images ──────────────
-// Matches absolute paths like /home/.../agent2077-images/filename.png
-const IMAGE_PATH_REGEX = /(\/(?:home|root)\/[^\s]*\/agent2077-images\/[^\s]+\.(?:png|jpg|jpeg|webp|gif))/gi;
-
-function imagePathToUrl(filePath: string): string {
-  return `/api/images/file?path=${encodeURIComponent(filePath)}`;
-}
-
-/** Extract and render only inline images from message content (text is handled by ReactMarkdown) */
-function MessageContentWithImages({
-  content,
-  onImageClick,
-}: {
-  content: string;
-  onImageClick?: (src: string, alt: string) => void;
-}) {
-  const parts = content.split(IMAGE_PATH_REGEX);
-  if (parts.length === 1) return null; // No image paths found
-
-  // Only render <img> tags — text is rendered separately by ReactMarkdown
-  const images = parts.filter((part) => {
-    IMAGE_PATH_REGEX.lastIndex = 0;
-    return IMAGE_PATH_REGEX.test(part);
-  });
-
-  if (images.length === 0) return null;
-
-  return (
-    <div className="space-y-2">
-      {images.map((imgPath, i) => {
-        IMAGE_PATH_REGEX.lastIndex = 0;
-        const url = imagePathToUrl(imgPath);
-        const filename = imgPath.split("/").pop() || "image.png";
-        return (
-          <div key={i} className="my-2">
-            <img
-              src={url}
-              alt={filename}
-              className="max-w-sm max-h-80 rounded-lg border border-border/40 cursor-pointer hover:opacity-90 transition-opacity shadow-lg"
-              onClick={() => onImageClick?.(url, filename)}
-              loading="lazy"
-              data-testid={`inline-image-${i}`}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+// Inline image path detection (IMAGE_PATH_REGEX, imagePathToUrl,
+// MessageContentWithImages) now lives in @/components/chat-markdown.
 
 // ── Confirmation Banner ───────────────────────────────────────────
 function ConfirmBanner({
@@ -385,11 +337,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   // inputRef doubles as textareaRef — uncontrolled input so keystrokes don't re-render ChatPage
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [inputEmpty, setInputEmpty] = useState(true); // only for send button disabled — avoids re-render on every keystroke
-  const [streaming, setStreaming] = useState(false);
   const [pausedCredit, setPausedCredit] = useState<{ provider: string; resumeMessage: string; reason?: string; currentBalance?: string | null; floorBalance?: string | null } | null>(null);
-  const [streamContent, setStreamContent] = useState("");
-  const [steps, setSteps] = useState<any[]>([]);
-  const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
   const [routingInfo, setRoutingInfo] = useState<any>(null);
   const [contextUsage, setContextUsage] = useState<{
     estimatedPromptTokens: number;
@@ -401,7 +349,6 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
   const [iterationCount, setIterationCount] = useState(0);
   const [toolCallCount, setToolCallCount] = useState(0);
-  const [statusLog, setStatusLog] = useState<Array<{ message: string; detail?: string; timestamp: number }>>([]);
   const [nudgeInput, setNudgeInput] = useState("");
   const [nudgeSent, setNudgeSent] = useState(false);
   const [currentConvId, setCurrentConvId] = useState<number | null>(
@@ -412,15 +359,6 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     id: number; name: string; description: string; taskType: string; toolsUsed: string[];
   } | null>(null);
 
-  const [pendingConfirm, setPendingConfirm] = useState<{
-    id: string;
-    tool: string;
-    args?: Record<string, any>;
-    reason: string;
-    resolve: (approved: boolean) => void;
-  } | null>(null);
-  const [diffPreviews, setDiffPreviews] = useState<DiffPreviewData[]>([]);
-  const [activeDiff, setActiveDiff] = useState<DiffPreviewData | null>(null);
   const [attachedImages, setAttachedImages] = useState<File[]>([]);
   const [pendingImages, setPendingImages] = useState<Array<{name: string, base64: string, mimeType: string}>>([]);
   const [attachedFiles, setAttachedFiles] = useState<Array<{name: string, content: string, mimeType: string}>>([]);
@@ -434,8 +372,6 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [showJumpToPresent, setShowJumpToPresent] = useState(false);
   const { toast } = useToast();
-  const abortRef = useRef<AbortController | null>(null);
-  const requestIdRef = useRef<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = inputRef; // alias — same ref, used for auto-resize
@@ -482,6 +418,124 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
 
   const activeReasoningLabel = reasoningModes.find(r => r.id === reasoningModeId)?.label;
 
+  // Shared SSE stream hook — owns streaming/content/status/steps/plan/confirm/diff.
+  // Main-chat-only events (conversation nav, user_message refetch, context_usage,
+  // skill_proposal, subtask_progress, paused_credit, done counters) are layered via onEvent.
+  const stream = useChatStream({
+    onEvent: (event: ChatStreamEvent) => {
+      const e = event as any;
+      switch (event.type) {
+        case "conversation":
+          setCurrentConvId(e.id);
+          navigate(`/chat/${e.id}`, { replace: true });
+          queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
+          break;
+        case "user_message":
+          refetch().then(() => {
+            setPendingUserMessage(null);
+            setPendingImages([]);
+          });
+          break;
+        case "routing":
+          setRoutingInfo(event);
+          break;
+        case "context_usage":
+          setContextUsage({
+            estimatedPromptTokens: e.estimatedPromptTokens,
+            contextWindowTokens: e.contextWindowTokens,
+            contextUsedPercent: e.contextUsedPercent,
+            source: e.source,
+            detail: e.detail,
+          });
+          break;
+        case "skill_proposal": {
+          const sk = e.skill;
+          stream.setSteps(prev => [...prev, {
+            type: "step",
+            label: `Skill proposed: ${sk?.name}`,
+            detail: sk?.description,
+            status: "completed",
+          }]);
+          if (!sk?.autoApprove && sk?.id) {
+            setPendingSkill({
+              id: sk.id,
+              name: sk.name,
+              description: sk.description,
+              taskType: sk.taskType,
+              toolsUsed: sk.toolsUsed || [],
+            });
+          }
+          break;
+        }
+        case "subtask_progress": {
+          const AGENT_COLORS = ["bg-blue-500", "bg-green-500", "bg-purple-500", "bg-orange-500", "bg-red-500"];
+          setActiveSubAgents(prev => {
+            const next = new Map(prev);
+            if (e.status === "running") {
+              const colorIdx = (e.specIndex ?? 0) % AGENT_COLORS.length;
+              next.set(e.subtaskId, { title: e.title, color: AGENT_COLORS[colorIdx], status: "running" });
+            } else {
+              next.delete(e.subtaskId);
+            }
+            return next;
+          });
+          break;
+        }
+        case "paused_credit": {
+          const isFloor = e.reason === "balance_floor";
+          const curBal = e.currentBalance != null ? `$${Number(e.currentBalance).toFixed(2)}` : null;
+          const floorBal = e.floorBalance != null ? `$${Number(e.floorBalance).toFixed(2)}` : null;
+          setPausedCredit({
+            provider: e.provider || "openrouter",
+            resumeMessage: e.resumeMessage || "Please continue from where you left off.",
+            reason: e.reason || "exhausted",
+            currentBalance: curBal,
+            floorBalance: floorBal,
+          });
+          stream.setStreaming(false);
+          if (isFloor) {
+            toast({
+              title: "⚠️ OpenRouter balance floor reached",
+              description: curBal && floorBal
+                ? `Balance ${curBal} is below your floor of ${floorBal}. Switch to a local model or adjust the floor in Settings → API Endpoints.`
+                : "Balance is below your configured floor. Task paused.",
+              variant: "destructive",
+              duration: 10000,
+            });
+          } else {
+            toast({
+              title: "⚠️ OpenRouter balance empty",
+              description: "Top up at openrouter.ai/credits then click Resume.",
+              variant: "destructive",
+              duration: 10000,
+            });
+          }
+          break;
+        }
+        case "done":
+          setIterationCount(e.iterations || 0);
+          setToolCallCount(e.toolCallCount || 0);
+          break;
+      }
+    },
+  });
+  const {
+    streaming,
+    streamContent,
+    statusLog,
+    steps,
+    planSteps,
+    pendingConfirm,
+    activeDiff,
+    setActiveDiff,
+    setStreaming,
+    setStreamContent,
+    setSteps,
+    setPlanSteps,
+    setStatusLog,
+    setPendingConfirm,
+  } = stream;
+
   // Sync conversationId prop changes (component stays mounted across nav)
   useEffect(() => {
     if (conversationId) {
@@ -509,6 +563,43 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
       setStatusLog([]);
     }
   }, [conversationId]);
+
+  // Hard reset to a blank new chat. Used by the sidebar's + button via the
+  // NEW_CHAT_EVENT, which fires even when the route does not change (wouter
+  // won't re-render on a navigation to the route you're already on, e.g. when
+  // location is already "/" or an unmatched route yields no conversation id).
+  // Without this, clicking + while no chat is selected was a no-op and any
+  // stale conversation / streamed draft kept showing.
+  const resetToNewChat = useCallback(() => {
+    // Abort any in-flight stream so the new chat starts clean.
+    if (streaming) stream.stop();
+    stream.reset();
+    setCurrentConvId(null);
+    setRoutingInfo(null);
+    setContextUsage(null);
+    setPendingUserMessage(null);
+    setPendingImages([]);
+    setAttachedImages([]);
+    setAttachedFiles([]);
+    setIterationCount(0);
+    setToolCallCount(0);
+    setActiveSubAgents(new Map());
+    setPendingSkill(null);
+    setPausedCredit(null);
+    setLightboxImage(null);
+    setDeepResearch(false);
+    setNudgeInput("");
+    setNudgeSent(false);
+    if (inputRef.current) inputRef.current.value = "";
+    setInputEmpty(true);
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
+  }, [streaming, stream]);
+
+  useEffect(() => {
+    const handler = () => resetToNewChat();
+    window.addEventListener(NEW_CHAT_EVENT, handler);
+    return () => window.removeEventListener(NEW_CHAT_EVENT, handler);
+  }, [resetToNewChat]);
 
   // Track scroll position
   const handleScroll = useCallback(() => {
@@ -700,8 +791,13 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   }, [steps.length]);
 
   const handleSend = useCallback(async (overrideMessage?: string) => {
-    const msg = overrideMessage || inputRef.current?.value.trim() || "";
-    if (!msg || streaming) return;
+    const typed = overrideMessage || inputRef.current?.value.trim() || "";
+    // Allow sending with no text as long as something is attached (image or file),
+    // matching the Send button's enabled state. The server requires a non-empty
+    // message, so fall back to a short caption describing the attachment.
+    const hasAttachment = attachedImages.length > 0 || attachedFiles.length > 0;
+    if ((!typed && !hasAttachment) || streaming) return;
+    const msg = typed || (attachedImages.length > 0 ? "(image attached)" : "(file attached)");
     // Deep Research is one-shot: snapshot the toggle for this send, then reset.
     const useDeepResearch = deepResearch;
     if (deepResearch) setDeepResearch(false);
@@ -710,19 +806,12 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-    setStreaming(true);
-    setStreamContent("");
-    setSteps([]);
-    setPlanSteps([]);
+    stream.reset();
     setRoutingInfo(null);
     setPendingUserMessage(msg);
     setIterationCount(0);
     setToolCallCount(0);
-    setStatusLog([]);
     setActiveSubAgents(new Map());
-
-    // requestId comes from the server via "request_id" event — reset until we receive it
-    requestIdRef.current = "";
 
     // Convert attached images to base64
     const imageData: Array<{name: string, base64: string, mimeType: string}> = [];
@@ -737,15 +826,10 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
     setPendingImages(imageData);
     setAttachedImages([]);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
+      await stream.start({
+        url: "/api/chat",
+        body: {
           conversationId: convId,
           message: msg,
           deepResearch: useDeepResearch || undefined,
@@ -753,226 +837,13 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
           reasoningModeLabel: activeReasoningLabel || undefined,
           images: imageData.length > 0 ? imageData : undefined,
           attachments: attachedFiles.length > 0 ? attachedFiles : undefined,
-        }),
-        signal: controller.signal,
+        },
       });
-
-      const reader = res.body?.getReader();
-      if (!reader) return;
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let content = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event: StreamEvent = JSON.parse(line.slice(6));
-
-            switch (event.type) {
-              case "request_id":
-                // Server sends its requestId so stop button can target it
-                requestIdRef.current = event.requestId;
-                break;
-              case "conversation":
-                setCurrentConvId(event.id);
-                navigate(`/chat/${event.id}`, { replace: true });
-                queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
-                break;
-              case "user_message":
-                // Real user message is now saved in DB — fetch it immediately
-                // so it appears in the chat while the agent is still responding,
-                // then clear the optimistic bubble.
-                refetch().then(() => {
-                  setPendingUserMessage(null);
-                  setPendingImages([]);
-                });
-                break;
-              case "routing":
-                setRoutingInfo(event);
-                break;
-              case "context_usage":
-                setContextUsage({
-                  estimatedPromptTokens: event.estimatedPromptTokens,
-                  contextWindowTokens: event.contextWindowTokens,
-                  contextUsedPercent: event.contextUsedPercent,
-                  source: event.source,
-                  detail: event.detail,
-                });
-                break;
-              case "content":
-                content += event.content;
-                setStreamContent(content);
-                break;
-              case "step":
-                setSteps(prev => [...prev, event]);
-                break;
-              case "plan":
-                // Received execution plan from the agent
-                if (event.steps && Array.isArray(event.steps)) {
-                  setPlanSteps(event.steps.map((s: any) => ({
-                    step: s.step,
-                    title: s.title,
-                    status: "pending" as const,
-                  })));
-                }
-                break;
-              case "skill_proposal": {
-                const sk = event.skill;
-                setSteps(prev => [...prev, {
-                  type: "step",
-                  label: `Skill proposed: ${sk?.name}`,
-                  detail: sk?.description,
-                  status: "completed",
-                }]);
-                // Only show approval banner if not auto-approved and we have an id
-                if (!sk?.autoApprove && sk?.id) {
-                  setPendingSkill({
-                    id: sk.id,
-                    name: sk.name,
-                    description: sk.description,
-                    taskType: sk.taskType,
-                    toolsUsed: sk.toolsUsed || [],
-                  });
-                }
-                break;
-              }
-              case "status":
-                setStatusLog(prev => {
-                  const entry = { message: event.message, detail: event.detail, timestamp: event.timestamp || Date.now() };
-                  // Keep last 20 entries to avoid unbounded growth
-                  const next = [...prev, entry];
-                  return next.length > 20 ? next.slice(-20) : next;
-                });
-                break;
-              case "system_notice":
-                // Mid-run nudge acknowledgment (or other system notes) — surface
-                // it in the activity log so the injected context is visible.
-                setStatusLog(prev => {
-                  const entry = { message: event.content || "Note", timestamp: Date.now() };
-                  const next = [...prev, entry];
-                  return next.length > 20 ? next.slice(-20) : next;
-                });
-                break;
-              case "subtask_progress": {
-                const AGENT_COLORS = ["bg-blue-500", "bg-green-500", "bg-purple-500", "bg-orange-500", "bg-red-500"];
-                setActiveSubAgents(prev => {
-                  const next = new Map(prev);
-                  if (event.status === "running") {
-                    const colorIdx = (event.specIndex ?? 0) % AGENT_COLORS.length;
-                    next.set(event.subtaskId, { title: event.title, color: AGENT_COLORS[colorIdx], status: "running" });
-                  } else {
-                    next.delete(event.subtaskId);
-                  }
-                  return next;
-                });
-                break;
-              }
-              case "paused_credit": {
-                const isFloor = event.reason === "balance_floor";
-                const curBal = event.currentBalance != null ? `$${Number(event.currentBalance).toFixed(2)}` : null;
-                const floorBal = event.floorBalance != null ? `$${Number(event.floorBalance).toFixed(2)}` : null;
-
-                setPausedCredit({
-                  provider: event.provider || "openrouter",
-                  resumeMessage: event.resumeMessage || "Please continue from where you left off.",
-                  reason: event.reason || "exhausted",
-                  currentBalance: curBal,
-                  floorBalance: floorBal,
-                });
-                setStreaming(false);
-
-                // Fire a toast so the user can't miss it regardless of scroll position
-                if (isFloor) {
-                  toast({
-                    title: "⚠️ OpenRouter balance floor reached",
-                    description: curBal && floorBal
-                      ? `Balance ${curBal} is below your floor of ${floorBal}. Switch to a local model or adjust the floor in Settings → API Endpoints.`
-                      : "Balance is below your configured floor. Task paused.",
-                    variant: "destructive",
-                    duration: 10000,
-                  });
-                } else {
-                  toast({
-                    title: "⚠️ OpenRouter balance empty",
-                    description: "Top up at openrouter.ai/credits then click Resume.",
-                    variant: "destructive",
-                    duration: 10000,
-                  });
-                }
-                break;
-              }
-              case "confirmation_needed": {
-                // Fix 1: confirmation_needed was missing from the main fetch stream path.
-                // It only existed in the EventSource reconnect path, so the banner
-                // never appeared during a live send — only visible after page reload.
-                const confirmId = event.id;
-                setPendingConfirm({
-                  id: confirmId,
-                  tool: event.tool,
-                  args: event.args,
-                  reason: event.reason,
-                  resolve: (approved: boolean) => {
-                    fetch("/api/chat/confirm", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      credentials: "include",
-                      body: JSON.stringify({ confirmId, approved }),
-                    }).catch(() => {});
-                    if (!approved) {
-                      content += "\n\n*Operation declined by user.*";
-                      setStreamContent(content);
-                    }
-                  },
-                });
-                break;
-              }
-              case "error":
-                content += `\n\n**Error:** ${event.content}`;
-                setStreamContent(content);
-                break;
-              case "diff_preview":
-                if (event.editId && event.filePath) {
-                  const dp: DiffPreviewData = {
-                    editId: event.editId,
-                    filePath: event.filePath,
-                    description: event.description,
-                    original: event.original || "",
-                    proposed: event.proposed || "",
-                  };
-                  setDiffPreviews(prev => [...prev, dp]);
-                  setActiveDiff(dp);
-                }
-                break;
-              case "done":
-                setIterationCount(event.iterations || 0);
-                setToolCallCount(event.toolCallCount || 0);
-                // Mark all plan steps as completed when done
-                setPlanSteps(prev => prev.map(s => ({ ...s, status: "completed" as const })));
-                break;
-            }
-          } catch { }
-        }
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setStreamContent(prev => prev + `\n\n**Error:** ${err.message}`);
-      }
     } finally {
-      setStreaming(false);
       setPendingUserMessage(null);
       setPendingImages([]);
       setAttachedFiles([]);
       setActiveSubAgents(new Map());
-      abortRef.current = null;
       // Note: do NOT clear pausedCredit here — it must persist so the Resume button stays visible
       refetch();
       queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
@@ -998,18 +869,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
   }, []);
 
   const handleStop = () => {
-    // Send server-side cancel first (before aborting the connection)
-    if (requestIdRef.current) {
-      fetch("/api/chat/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ requestId: requestIdRef.current }),
-      }).catch(() => {});
-    }
-    // Then abort the SSE connection (triggers res.on("close") on server as backup)
-    abortRef.current?.abort();
-    setStatusLog(prev => [...prev, { message: "Stopped", timestamp: Date.now() }]);
+    stream.stop();
   };
 
   const handleNudge = useCallback(async () => {
@@ -1515,7 +1375,7 @@ export default function ChatPage({ conversationId }: { conversationId?: string }
                 <Square className="w-4 h-4" />
               </Button>
             ) : (
-              <Button size="sm" onClick={() => handleSend()} disabled={inputEmpty && attachedImages.length === 0} data-testid="button-send" className="shrink-0">
+              <Button size="sm" onClick={() => handleSend()} disabled={inputEmpty && attachedImages.length === 0 && attachedFiles.length === 0} data-testid="button-send" className="shrink-0">
                 <Send className="w-4 h-4" />
               </Button>
             )}
@@ -1802,7 +1662,7 @@ const MessageBubble = memo(function MessageBubble({
                   ))}
                 </div>
               )}
-              <p className="whitespace-pre-wrap">{message.content}</p>
+              <p className="whitespace-pre-wrap text-left">{message.content}</p>
             </>
           ) : (
             <div className="markdown-content">

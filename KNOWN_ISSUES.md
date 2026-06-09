@@ -188,5 +188,15 @@ As of v16.23, `selfdev_edit_file`, `selfdev_write_lines`, and `selfdev_rewrite_f
 ### 37. WAL must be flushed before packaging
 Before creating a distribution zip, always run `PRAGMA wal_checkpoint(TRUNCATE)` on the DB, then delete `*.db-wal` and `*.db-shm` files. If you package with a WAL file present, the DB inside the zip will be unreadable (sqlite3 returns "file is not a database" error). Always verify the DB by extracting it from the zip and running a query before delivering.
 
+---
+
+## Agent Loop (continued)
+
+### 38. Over-eager tool calls on casual / new-chat turns
+**Root cause**: Two compounding issues. (1) `tool_choice` was hardcoded to `"auto"` in both `chatCompletion` and `chatCompletionStream` (llm-client.ts), so even on a pure-chat turn — where the selector still ships a small "floor" of tools (`memory_recall`, `session_search`, etc.) plus any connected MCP tools — the model (especially small/local ones) would eagerly invoke them on a plain "hi". (2) The request-router only emitted the `respond` route for an exact set of greetings/"what is X" prefixes; broader small talk ("how's it going", new-chat openers) fell through to `unknown`, which loaded the full task bundle.
+**Fix**: Added a `toolChoice?: "auto" | "none" | "required"` option to both LLM-client functions (default `"auto"`). Added `isCasualChat`/`hasActionableSignal`/`decideToolChoice` to request-router.ts: a turn is treated as casual (→ `tool_choice:"none"`) only when it has a casual marker or is very short AND has zero actionable signal (action verbs, file/path/url/code refs, app nouns). The agent loop applies this on the FIRST iteration only; once mid-task it's always `"auto"`. Project mode and the Deep Research toggle always keep `"auto"`. Tool schemas are STILL attached when `"none"` — so a genuine follow-up action works and the model can self-correct on later iterations. Do NOT hard-block tools globally; the gate is intent-based and conservative (ambiguous longer messages keep tools on). Covered by `server/lib/request-router.test.ts`.
+
+---
+
 *Last updated: ${new Date().toISOString()}*
 *Add new entries at the bottom with the next sequential number.*

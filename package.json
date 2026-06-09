@@ -1,6 +1,7 @@
 {
   "name": "agent2077",
-  "version": "1.0.1",
+  "version": "1.0.7",
+  "appVersion": "16.74.15",
   "private": true,
   "type": "module",
   "scripts": {

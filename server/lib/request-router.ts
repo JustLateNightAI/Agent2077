@@ -156,6 +156,108 @@ const ROUTE_FORCE_INCLUDE: Record<Route, string[]> = {
   unknown:        [],
 };
 
+// ── Casual / non-actionable chat detection (v16.75) ─────────────────────────
+// The deterministic router below only emits `respond` for a narrow set of exact
+// greetings/acknowledgements. Real casual chat is broader ("how's it going?",
+// "lol that's wild", "I was just thinking about X"), and brand-new chats often
+// open with small talk. On those turns the router returns `unknown`, the
+// selector loads a full task bundle, and (with tool_choice:auto) small models
+// eagerly fire floor/task tools the user never asked for.
+//
+// `isCasualChat` is the positive signal: the message reads as conversation.
+// `hasActionableSignal` is the safety guard: if ANY action/task cue is present
+// we do NOT treat the turn as casual, so tools stay enabled. This keeps the
+// gate conservative — we only suppress tools when we're confident nothing was
+// asked of the agent.
+
+// Verbs/nouns that imply the user wants the agent to DO something with tools.
+// Deliberately broad; a single hit disqualifies "casual".
+const ACTIONABLE_SIGNAL_RX = new RegExp(
+  [
+    // imperative action verbs
+    "\\b(create|make|build|write|edit|modify|update|change|fix|debug|refactor|implement|generate|add|remove|delete|rename|move|deploy|launch|install|run|execute|exec|start|stop|restart|search|find|look\\s*up|fetch|download|scrape|browse|open|read|show|list|inspect|analy[sz]e|compare|review|investigate|research|summari[sz]e|render|draw|paint|upscale|commit|push|pull|clone|test|check)\\b",
+    // file / path / code references
+    "\\b(file|files|folder|directory|repo|repository|codebase|project|function|class|module|component|endpoint|api|script|command|terminal|shell|server|database|table|query)\\b",
+    "[\\w./-]+\\.(ts|tsx|js|jsx|py|rs|go|java|cs|cpp|c|h|sh|md|json|yaml|yml|toml|sql|html|css)\\b",
+    // urls, backtick commands, code-fence
+    "https?://\\S+",
+    "`[^`]{2,}`",
+    "```",
+    // app/game/deploy nouns
+    "\\b(app|application|webapp|web\\s*app|website|web\\s*site|game|dashboard|tool|service)\\b",
+    // question forms that usually need a lookup/tool ("can you find", "do we have")
+    "\\b(can\\s+you\\s+(find|search|look|fetch|run|build|make|create|fix|check|open|read|show)|do\\s+(we|i)\\s+have)\\b",
+  ].join("|"),
+  "i",
+);
+
+// Conversational openers / small talk. These are POSITIVE casual cues but on
+// their own are not sufficient — we still require absence of actionable signal.
+const CASUAL_CHAT_RX = new RegExp(
+  [
+    "^(hi|hey|hello|yo|sup|hiya|howdy|good\\s+(morning|afternoon|evening|night))\\b",
+    "^(thanks|thank\\s+you|thx|ty|cheers|np|no\\s+prob(?:lem)?)\\b",
+    "^(ok|okay|sure|alright|got\\s+it|understood|great|nice|cool|awesome|perfect|sounds\\s+good)\\b",
+    "^(yes|no|yeah|nah|yep|nope|maybe|idk|i\\s+dunno)\\b",
+    "^(bye|goodbye|cya|see\\s+you|later|gtg)\\b",
+    "^(lol|lmao|rofl|haha+|hehe+|nice\\s+one)\\b",
+    "\\bhow\\s+(are|r)\\s+(you|u|ya)\\b",
+    "\\bhow.?s\\s+(it\\s+going|your\\s+day|life)\\b",
+    "\\bwhat.?s\\s+up\\b",
+    "\\bhow\\s+(have\\s+you\\s+been|you\\s+doing)\\b",
+    "\\b(who\\s+are\\s+you|what\\s+can\\s+you\\s+do|what\\s+are\\s+you|tell\\s+me\\s+about\\s+yourself)\\b",
+    "\\bjust\\s+(saying|chatting|wanted\\s+to\\s+say|thinking)\\b",
+    "\\bnice\\s+to\\s+meet\\s+you\\b",
+  ].join("|"),
+  "i",
+);
+
+/**
+ * True when the message contains any cue that the user wants an action / tool.
+ * Exported for tests and for the tool-choice gate.
+ */
+export function hasActionableSignal(message: string | undefined): boolean {
+  const msg = (message || "").trim();
+  if (!msg) return false;
+  return ACTIONABLE_SIGNAL_RX.test(msg);
+}
+
+/**
+ * True when the latest user message reads as casual conversation / small talk
+ * with NO actionable intent. Conservative: any actionable signal vetoes it.
+ *
+ * Used to decide `tool_choice: "none"` for the turn so the agent replies
+ * normally instead of eagerly invoking tools. Tools are still attached, so a
+ * genuine follow-up action on a later turn works normally.
+ */
+export function isCasualChat(message: string | undefined): boolean {
+  const msg = (message || "").trim();
+  if (!msg) return true; // empty / brand-new chat opener: nothing was asked
+  if (hasActionableSignal(msg)) return false;
+  // A short message with no actionable signal is very likely chit-chat.
+  // (≤ 6 words, e.g. "what do you think?", "anyway, that's funny")
+  const wordCount = msg.split(/\s+/).filter(Boolean).length;
+  if (wordCount <= 6) return true;
+  return CASUAL_CHAT_RX.test(msg);
+}
+
+/**
+ * Decide the OpenAI `tool_choice` for THIS turn.
+ *  - "none"  → tools attached but the model may not call them (casual chat).
+ *  - "auto"  → model decides (default for anything actionable).
+ *
+ * Project mode and the deep-research toggle always keep "auto" — those are
+ * explicit task contexts where the user opted into tool use.
+ */
+export function decideToolChoice(
+  message: string | undefined,
+  ctx?: { customPrompt?: string; deepResearch?: boolean },
+): "auto" | "none" {
+  if (ctx?.deepResearch) return "auto";
+  if (ctx?.customPrompt && PROJECT_CONTEXT_RX.test(ctx.customPrompt)) return "auto";
+  return isCasualChat(message) ? "none" : "auto";
+}
+
 /**
  * Classify the latest user message + optional context.
  */
